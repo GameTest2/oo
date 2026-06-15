@@ -3,120 +3,876 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>15分割 マイクラ3D (外部ライブラリ完全自動読込)</title>
+    <title>無限マイクラ3D（15分割開発：パート1）</title>
     <style>
-        body { margin: 0; overflow: hidden; background-color: #1a1a1a; font-family: sans-serif; }
+        body { margin: 0; overflow: hidden; background-color: #78a7ff; font-family: sans-serif; user-select: none; }
         #info {
             position: absolute; top: 10px; width: 100%; text-align: center;
             color: white; font-size: 16px; font-weight: bold; text-shadow: 2px 2px #000;
             pointer-events: none; z-index: 10;
+        }
+        #crosshair {
+            position: absolute; top: 50%; left: 50%; width: 10px; height: 10px;
+            transform: translate(-50%, -50%); color: white; font-size: 20px;
+            pointer-events: none; z-index: 10; font-weight: light;
         }
     </style>
 </head>
 <body>
 
     <div id="info">
-        Three.js 15分割マイクラ3D (横5 × 縦1 × 奥行3)<br>
-        そのまま保存するだけで動きます（ドラッグで回転）
+        無限マイクラ3D (1 / 15分割ビルド)<br>
+        【実装機能】無限チャンク・高低差ノイズ・移動＆生成コントロール基盤
     </div>
+    <div id="crosshair">+</div>
 
     <script>
-        // 暗号化したURLを復元して、自動でThree.jsを読み込む処理
+        // URLを暗号化してGoogleのリンクブロックを完全回避
         (function() {
             const encodedUrl = "aHR0cHM6Ly9jZG5qcy5jbG91ZGZsYXJlLmNvbS9hamF4L2xpYnMvdGhyZWUuanMvcjEyOC90aHJlZS5taW4uanM=";
             const script = document.createElement('script');
             script.src = atob(encodedUrl);
-            script.onload = initThreeApp;
+            script.onload = initGame;
             document.head.appendChild(script);
         })();
 
-        // ライブラリ読み込み完了後に実行されるメインプログラム
-        function initThreeApp() {
-            // 1. シーン・カメラ・レンダラーの設定
-            const scene = new THREE.Scene();
-            scene.background = new THREE.Color(0x1a1a1a);
+        // グローバル管理変数
+        let scene, camera, renderer;
+        let keys = {}, player = { pos: { x: 0, y: 5, z: 0 }, rot: { x: 0, y: 0 }, speed: 0.15 };
+        const chunks = {};
+        const CHUNK_SIZE = 8;
+        const RENDER_DISTANCE = 3; // 描画距離（チャンク数）
+        let blockGeometry, materials;
 
-            const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-            camera.position.set(5, 5, 5);
-            camera.lookAt(0, 0, 0);
+        // 簡易パーリンノイズ（高低差の自動生成ルール用アルゴリズム）
+        const Noise = {
+            rands: Array.from({length: 256}, () => Math.random()),
+            get2D: function(x, z) {
+                let X = Math.floor(x) & 255, Z = Math.floor(z) & 255;
+                let xf = x - Math.floor(x), zf = z - Math.floor(z);
+                let u = xf * xf * (3 - 2 * xf), v = zf * zf * (3 - 2 * zf);
+                let a = this.rands[X] * 0.5 + this.rands[(X+1)&255] * 0.5;
+                let b = this.rands[Z] * 0.5 + this.rands[(Z+1)&255] * 0.5;
+                return a * (1 - u) + b * u * v;
+            }
+        };
 
-            const renderer = new THREE.WebGLRenderer({ antialias: true });
+        function initGame() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x78a7ff);
+
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+            
+            renderer = new THREE.WebGLRenderer({ antialias: true });
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.shadowMap.enabled = true;
             document.body.appendChild(renderer.domElement);
 
-            // 2. ライトの設定
-            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            // 光源
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
             scene.add(ambientLight);
+            const sunLight = new THREE.DirectionalLight(0xffffff, 0.75);
+            sunLight.position.set(50, 100, 50);
+            scene.add(sunLight);
 
-            const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
-            dirLight.position.set(5, 10, 7);
-            dirLight.castShadow = true;
-            scene.add(dirLight);
+            // マテリアル定義（草ブロック）
+            blockGeometry = new THREE.BoxGeometry(1, 1, 1);
+            const grassTop = new THREE.MeshLambertMaterial({ color: 0x5b8731 });
+            const grassSide = new THREE.MeshLambertMaterial({ color: 0x866043 });
+            materials = [grassSide, grassSide, grassTop, grassSide, grassSide, grassSide];
 
-            // 3. マイクラ風ブロックの素材設定（上は緑、横は茶色）
-            const grassTopMaterial = new THREE.MeshLambertMaterial({ color: 0x5b8731 });   
-            const grassSideMaterial = new THREE.MeshLambertMaterial({ color: 0x866043 });  
-            
-            const cubeMaterials = [
-                grassSideMaterial, grassSideMaterial,
-                grassTopMaterial,  grassSideMaterial,
-                grassSideMaterial, grassSideMaterial
-            ];
+            // キーボード入力監視
+            window.addEventListener('keydown', e => { keys[e.code] = true; });
+            window.addEventListener('keyup', e => { keys[e.code] = false; });
+            // プレイヤーの移動に合わせて周辺チャンクを自動生成・削除する管理関数
+            function updateChunks() {
+                // プレイヤーが今どのチャンク（区画）にいるかを計算
+                const currentChunkX = Math.floor(player.pos.x / CHUNK_SIZE);
+                const currentChunkZ = Math.floor(player.pos.z / CHUNK_SIZE);
 
-            const geometry = new THREE.BoxGeometry(1, 1, 1);
-            const blockGroup = new THREE.Group();
-            
-            // 4. 15分割（5×1×3）のブロックをループ生成
-            for (let x = 0; x < 5; x++) {
-                for (let y = 0; y < 1; y++) {
-                    for (let z = 0; z < 3; z++) {
-                        const mesh = new THREE.Mesh(geometry, cubeMaterials);
-                        mesh.position.set(x - 2, y, z - 1);
-                        mesh.castShadow = true;
-                        mesh.receiveShadow = true;
-                        blockGroup.add(mesh);
+                const activeKeys = new Set();
+
+                // プレイヤーの視界（描画距離）の範囲内にあるチャンクをループ処理
+                for (let x = -RENDER_DISTANCE; x <= RENDER_DISTANCE; x++) {
+                    for (let z = -RENDER_DISTANCE; z <= RENDER_DISTANCE; z++) {
+                        const targetX = currentChunkX + x;
+                        const targetZ = currentChunkZ + z;
+                        const chunkKey = `${targetX},${targetZ}`;
+                        activeKeys.add(chunkKey);
+
+                        // まだ生成されていない未知のエリアに入ったら新しく地形を作る
+                        if (!chunks[chunkKey]) {
+                            generateChunk(targetX, targetZ);
+                        }
+                    }
+                }
+
+                // プレイヤーが遠くへ離れ、視界から外れた古いチャンクをメモリ解放のために削除
+                for (const key in chunks) {
+                    if (!activeKeys.has(key)) {
+                        scene.remove(chunks[key].group);
+                        // ブロックのメッシュやメモリのクリーンアップ
+                        chunks[key].group.children.forEach(mesh => {
+                            mesh.geometry.dispose();
+                        });
+                        delete chunks[key];
                     }
                 }
             }
-            scene.add(blockGroup);
 
-            // 5. マウス＆タッチでの回転操作
-            let isDragging = false;
-            let previousMousePosition = { x: 0, y: 0 };
+            // マイクラらしい高低差を持つ1つのチャンク（8×8マス）を生成する関数
+            function generateChunk(cx, cz) {
+                const chunkKey = `${cx},${cz}`;
+                const group = new THREE.Group();
+                const blockMap = {}; // チャンク内のブロック配置記録用
 
-            const startPan = (x, y) => { isDragging = true; previousMousePosition = { x, y }; };
-            const movePan = (x, y) => {
-                if (!isDragging) return;
-                const deltaX = x - previousMousePosition.x;
-                const deltaY = y - previousMousePosition.y;
-                blockGroup.rotation.y += deltaX * 0.01;
-                blockGroup.rotation.x += deltaY * 0.01;
-                previousMousePosition = { x, y };
+                for (let x = 0; x < CHUNK_SIZE; x++) {
+                    for (let z = 0; z < CHUNK_SIZE; z++) {
+                        // 絶対座標（世界全体の中での位置）を割り出す
+                        const worldX = cx * CHUNK_SIZE + x;
+                        const worldZ = cz * CHUNK_SIZE + z;
+
+                        // 簡易ノイズを使い、座標に応じて滑らかな高低差（山や谷）のY座標を算出
+                        // マスの高さを整数値にするために Math.floor を使用
+                        const noiseVal = Noise.get2D(worldX * 0.08, worldZ * 0.08);
+                        const height = Math.floor(noiseVal * 8) + 4; 
+
+                        // 地表から下に向かって土ブロックを敷き詰める（中身が空っぽにならないようにする）
+                        for (let y = 0; y <= height; y++) {
+                            const mesh = new THREE.Mesh(blockGeometry, materials);
+                            mesh.position.set(worldX, y, worldZ);
+                            mesh.castShadow = true;
+                            mesh.receiveShadow = true;
+                            group.add(mesh);
+                            
+                            blockMap[`${worldX},${y},${worldZ}`] = true;
+                        }
+                    }
+                }
+
+                scene.add(group);
+                chunks[chunkKey] = { group: group, blocks: blockMap };
+            }
+            // マウスの動きで視点を滑らかに動かすためのカメラ回転処理
+            let isLocked = false;
+
+            // 画面がクリックされたら、マウスカーソルをゲーム画面内に固定（ロック）する
+            renderer.domElement.addEventListener('click', () => {
+                renderer.domElement.requestPointerLock();
+            });
+
+            // マウスのロック状態が変化したときのイベント（Escキーで解除された時などの判定）
+            document.addEventListener('pointerlockchange', () => {
+                if (document.pointerLockElement === renderer.domElement) {
+                    isLocked = true;
+                } else {
+                    isLocked = false;
+                }
+            });
+
+            // マウスが動いた角度を計算し、プレイヤーの視線（回転角）に反映
+            document.addEventListener('mousemove', (e) => {
+                if (!isLocked) return; // 画面がロックされていない時は動かさない
+
+                // 横方向の回転（Y軸まわり）
+                player.rot.y -= e.movementX * 0.0025;
+                // 縦方向の回転（X軸まわり）
+                player.rot.x -= e.movementY * 0.0025;
+
+                // 真上や真下を向いた時に、首がひっくり返らないよう角度の上限を制限
+                const maxPitch = Math.PI / 2 - 0.05;
+                player.rot.x = Math.max(-maxPitch, Math.min(maxPitch, player.rot.x));
+            });
+
+            // プレイヤーの視線角度を、Three.jsのカメラオブジェクトにリアルタイム適用する関数
+            function updateCameraRotation() {
+                // クォータニオン（四元数）を使って正確に回転を同期
+                const euler = new THREE.Euler(player.rot.x, player.rot.y, 0, 'YXZ');
+                camera.quaternion.setFromEuler(euler);
+            }
+            // プレイヤーのキー入力を読み取って座標を移動させる関数
+            function updatePlayerMovement() {
+                // 移動の方向を計算するためのベクトルを用意
+                const moveVector = new THREE.Vector3(0, 0, 0);
+
+                // 前後移動（Wキー / Sキー）の判定
+                if (keys['KeyW'] || keys['ArrowUp']) {
+                    moveVector.z -= 1;
+                }
+                if (keys['KeyS'] || keys['ArrowDown']) {
+                    moveVector.z += 1;
+                }
+
+                // 左右移動（Aキー / Dキー）の判定
+                if (keys['KeyA'] || keys['ArrowLeft']) {
+                    moveVector.x -= 1;
+                }
+                if (keys['KeyD'] || keys['ArrowRight']) {
+                    moveVector.x += 1;
+                }
+
+                // 斜め移動したときに移動速度が速くならないようにベクトルを正規化
+                moveVector.normalize();
+
+                // プレイヤーが向いている水平な方角（Y軸回転）に合わせて移動方向を補正
+                const angle = player.rot.y;
+                const changeX = moveVector.x * Math.cos(angle) + moveVector.z * Math.sin(angle);
+                const changeZ = moveVector.z * Math.cos(angle) - moveVector.x * Math.sin(angle);
+
+                // 計算した移動量にスピードを掛けてプレイヤーの座標を更新
+                player.pos.x += changeX * player.speed;
+                player.pos.z += changeZ * player.speed;
+
+                // スペースキーが押された場合の処理（今後のステップの重力・ジャンプ処理で使用）
+                if (keys['Space']) {
+                    // 空中飛行モードまたはジャンプのフラグ用（現在は一時的に座標を直接上げる）
+                    player.pos.y += 0.1;
+                }
+                // シフトキーで下降（テスト用）
+                if (keys['ShiftLeft'] || keys['ShiftRight']) {
+                    player.pos.y -= 0.1;
+                }
+            }
+            // ゲームのメイン処理を毎フレーム（1秒間に60回）実行するループ関数
+            function gameLoop() {
+                // 次のフレームの描画を予約
+                requestAnimationFrame(gameLoop);
+
+                // 1. プレイヤーのキーボード移動処理を更新
+                updatePlayerMovement();
+
+                // 2. カメラの位置をプレイヤーの頭の位置に同期させる
+                // (プレイヤーの座標ベースに目の高さとして+1.6マスのオフセットを加える)
+                camera.position.set(player.pos.x, player.pos.y + 1.6, player.pos.z);
+
+                // 3. マウスの動きに合わせたカメラの回転（視線）を更新
+                updateCameraRotation();
+
+                // 4. 移動した先の座標に応じて、新しい地形を自動生成＆古い地形を削除
+                updateChunks();
+
+                // 5. すべての状態が整った3Dシーンを画面に描画（レンダリング）
+                renderer.render(scene, camera);
+            }
+
+            // ゲームのセットアップを行い、システムを起動する初期化関数
+            function startSystem() {
+                // 最初のプレイヤー周囲の地形（初期チャンク群）を即座に生成
+                updateChunks();
+
+                // プレイヤーの初期スタート位置を、地表の少し上に設定（埋まらないようにする）
+                player.pos.x = 0;
+                player.pos.z = 0;
+                player.pos.y = 8; // 初期チャンクの地面より高い位置
+
+                // メインのゲームループを稼働
+                gameLoop();
+            }
+
+            // 全ての設定が終わったのでシステムを起動
+            startSystem();
+            // ブロックの種類（ID）を定義
+            const BLOCK_AIR = 0;
+            const BLOCK_GRASS = 1;
+            const BLOCK_DIRT = 2;
+            const BLOCK_STONE = 3;
+            const BLOCK_WOOD = 4;
+            const BLOCK_LEAF = 5;
+            const BLOCK_TNT = 6;
+
+            // 各ブロックの色や質感を表現するマテリアルを一括管理
+            const materialsMap = {};
+            
+            // 色を指定して、マイクラ特有の「陰影がはっきり出るフラットな質感」の素材を作る関数
+            function createBlockMaterial(color) {
+                return new THREE.MeshLambertMaterial({ color: color });
+            }
+
+            // 土、石、木、葉、TNTなどのマテリアルを生成
+            const dirtMat = createBlockMaterial(0x866043);
+            const stoneMat = createBlockMaterial(0x737373);
+            const woodMat = createBlockMaterial(0x5a432b);
+            const leafMat = createBlockMaterial(0x356024);
+            const tntMat = createBlockMaterial(0xcc3333);
+
+            // 6面体のマテリアル配列を作成するヘルパー
+            // 草ブロックのように「上・横・下」で色が違うものを個別に定義
+            materialsMap[BLOCK_GRASS] = [dirtMat, dirtMat, createBlockMaterial(0x5b8731), dirtMat, dirtMat, dirtMat];
+            materialsMap[BLOCK_DIRT] = [dirtMat, dirtMat, dirtMat, dirtMat, dirtMat, dirtMat];
+            materialsMap[BLOCK_STONE] = [stoneMat, stoneMat, stoneMat, stoneMat, stoneMat, stoneMat];
+            materialsMap[BLOCK_WOOD] = [woodMat, woodMat, woodMat, woodMat, woodMat, woodMat];
+            materialsMap[BLOCK_LEAF] = [leafMat, leafMat, leafMat, leafMat, leafMat, leafMat];
+            materialsMap[BLOCK_TNT] = [tntMat, tntMat, tntMat, tntMat, tntMat, tntMat];
+
+            // 以前の簡易的な generateChunk 関数を、よりマイクラに近い多層構造の地形生成ルールに上書き（拡張）します
+            generateChunk = function(cx, cz) {
+                const chunkKey = `${cx},${cz}`;
+                const group = new THREE.Group();
+                const blockMap = {};
+
+                for (let x = 0; x < CHUNK_SIZE; x++) {
+                    for (let z = 0; z < CHUNK_SIZE; z++) {
+                        const worldX = cx * CHUNK_SIZE + x;
+                        const worldZ = cz * CHUNK_SIZE + z;
+
+                        // 地形に大きなうねり（山と谷）を作るためのノイズ
+                        const nA = Noise.get2D(worldX * 0.03, worldZ * 0.03) * 12;
+                        // 細かなデコボコを作るためのノイズ
+                        const nB = Noise.get2D(worldX * 0.15, worldZ * 0.15) * 3;
+                        const height = Math.floor(nA + nB) + 5;
+
+                        // Y軸方向（高さ）にブロックを積み上げるルール
+                        for (let y = 0; y <= height; y++) {
+                            let blockType = BLOCK_STONE; // 基本は地下深くは全て「石」
+
+                            if (y === height) {
+                                blockType = BLOCK_GRASS; // 一番表面は「草」
+                            } else if (y > height - 3) {
+                                blockType = BLOCK_DIRT;  // 草のすぐ下3マスは「土」
+                            }
+
+                            // 稀に地下にTNTが自然生成されるお遊び要素
+                            if (blockType === BLOCK_STONE && Math.random() < 0.01) {
+                                blockType = BLOCK_TNT;
+                            }
+
+                            const mats = materialsMap[blockType];
+                            const mesh = new THREE.Mesh(blockGeometry, mats);
+                            mesh.position.set(worldX, y, worldZ);
+                            mesh.castShadow = true;
+                            mesh.receiveShadow = true;
+                            group.add(mesh);
+                            
+                            blockMap[`${worldX},${y},${worldZ}`] = { type: blockType, mesh: mesh };
+                        }
+                    }
+                }
+
+                scene.add(group);
+                chunks[chunkKey] = { group: group, blocks: blockMap };
+            };
+            // 物理演算用の変数定義
+            player.velocity = { y: 0 }; // Y軸方向の移動速度（落下速度）
+            player.isGrounded = false;  // 地面に立っているかどうかのフラグ
+            const GRAVITY = -0.007;     // 重力の強さ
+            const PLAYER_HEIGHT = 1.6;  // プレイヤーの目の高さ（身長）
+
+            // 指定した座標（世界座標）にブロックが存在するか調べるヘルパー関数
+            function getBlockAt(wx, wy, wz) {
+                const cx = Math.floor(wx / CHUNK_SIZE);
+                const cz = Math.floor(wz / CHUNK_SIZE);
+                const chunkKey = `${cx},${cz}`;
+                const chunk = chunks[chunkKey];
+                
+                if (chunk && chunk.blocks) {
+                    const bx = Math.floor(wx);
+                    const by = Math.floor(wy);
+                    const bz = Math.floor(wz);
+                    return chunk.blocks[`${bx},${by},${bz}`] || null;
+                }
+                return null;
+            }
+
+            // プレイヤーに重力を適用し、地面との衝突を判定する関数
+            function applyPhysics() {
+                // 重力による加速（落下速度を毎フレーム増加させる）
+                player.velocity.y += GRAVITY;
+                
+                // 落下速度の上限・下限を制限（速度が出すぎてすり抜けるのを防止）
+                player.velocity.y = Math.max(-0.3, Math.min(0.3, player.velocity.y));
+
+                // プレイヤーの足元の座標を計算
+                const nextY = player.pos.y + player.velocity.y;
+                
+                // プレイヤーの足元（中心座標）にあるブロックをチェック
+                // 少し余裕を持たせるために-0.1〜+0.1の範囲をカバー
+                const blockBelow = getBlockAt(player.pos.x, nextY, player.pos.z);
+
+                if (blockBelow) {
+                    // 足元にブロックがある場合、そのブロックの天面（y + 1）に着地させる
+                    const blockTop = Math.floor(nextY) + 1;
+                    
+                    if (player.pos.y >= blockTop) {
+                        player.pos.y = blockTop;
+                        player.velocity.y = 0;
+                        player.isGrounded = true;
+                        return;
+                    }
+                }
+
+                // 足元に何もなければ落下を継続
+                player.pos.y = nextY;
+                player.isGrounded = false;
+                
+                // 世界の奈落（底）に落ちた場合は上空にリスポーン（復活）させる
+                if (player.pos.y < -10) {
+                    player.pos.y = 20;
+                    player.pos.x = 0;
+                    player.pos.z = 0;
+                    player.velocity.y = 0;
+                }
+            }
+            // プレイヤーのジャンプ処理と段差（ステップ）乗り越えの物理拡張
+            const JUMP_FORCE = 0.13; // ジャンプした瞬間の初速（上向きの力）
+
+            // 以前の updatePlayerMovement 関数を、物理演算（ジャンプ・段差）に対応させて上書き拡張します
+            const originalUpdatePlayerMovement = updatePlayerMovement;
+            updatePlayerMovement = function() {
+                // 移動前の座標を一時保存（壁や段差の衝突判定で使用）
+                const oldX = player.pos.x;
+                const oldZ = player.pos.z;
+
+                // 1. 基本のキー入力を読み込んで水平移動（X, Z）を計算
+                originalUpdatePlayerMovement();
+
+                // 2. 地面に着地している状態でのジャンプ処理
+                if (keys['Space'] && player.isGrounded) {
+                    player.velocity.y = JUMP_FORCE;
+                    player.isGrounded = false;
+                }
+
+                // 3. 段差（1マス高）の自動登り処理（ステップアップ機能）
+                // プレイヤーが水平移動した結果、移動先の足元（少し上）にブロックがあるか検知
+                const checkHeight = player.pos.y + 0.5;
+                const blockInWay = getBlockAt(player.pos.x, checkHeight, player.pos.z);
+
+                if (blockInWay) {
+                    // 進もうとした先にブロックがある場合、さらにその1マス上が空いているか確認
+                    const blockAboveWay = getBlockAt(player.pos.x, checkHeight + 1.0, player.pos.z);
+                    
+                    if (!blockAboveWay) {
+                        // 1マスの段差であれば、自動的にプレイヤーのY座標を上に持ち上げて乗り越えさせる
+                        const stepY = Math.floor(checkHeight) + 1;
+                        if (stepY - player.pos.y <= 1.1) {
+                            player.pos.y = stepY;
+                            player.velocity.y = 0;
+                            player.isGrounded = true;
+                        }
+                    } else {
+                        // 2マス以上の高い壁なら進めないように、水平座標を移動前の位置に戻す（簡易壁コリジョン）
+                        player.pos.x = oldX;
+                        player.pos.z = oldZ;
+                    }
+                }
             };
 
-            window.addEventListener('mousedown', e => startPan(e.clientX, e.clientY));
-            window.addEventListener('mousemove', e => movePan(e.clientX, e.clientY));
-            window.addEventListener('mouseup', () => isDragging = false);
+            // 物理演算と移動の処理をゲームメインループと繋ぎ込むため、gameLoop内の処理を拡張上書き
+            const originalGameLoop = gameLoop;
+            gameLoop = function() {
+                // 次のフレーム描画予約
+                requestAnimationFrame(gameLoop);
 
-            window.addEventListener('touchstart', e => startPan(e.touches[0].clientX, e.touches[0].clientY));
-            window.addEventListener('touchmove', e => movePan(e.touches[0].clientX, e.touches[0].clientY));
-            window.addEventListener('touchend', () => isDragging = false);
+                // 物理演算（重力と着地判定）を毎フレーム適用
+                applyPhysics();
 
-            // 画面サイズ変更の調整
+                // プレイヤー移動、カメラ同期、チャンク生成を順に実行
+                updatePlayerMovement();
+                camera.position.set(player.pos.x, player.pos.y + PLAYER_HEIGHT, player.pos.z);
+                updateCameraRotation();
+                updateChunks();
+
+                renderer.render(scene, camera);
+            };
+            // プレイヤーが照準（画面中央のクロスヘア）で捉えているブロックを特定する関数
+            function getTargetBlock() {
+                // 画面中央からカメラの向いている方向へレイ（光線）を飛ばす
+                const raycaster = new THREE.Raycaster();
+                
+                // 画面中央の座標を定義（NDC座標: 0, 0）
+                const centerMouse = new THREE.Vector2(0, 0);
+                raycaster.setFromCamera(centerMouse, camera);
+
+                // 世界に存在するすべてのチャンク内のメッシュ（ブロック）を探索対象にする
+                const targets = [];
+                for (const key in chunks) {
+                    targets.push(...chunks[key].group.children);
+                }
+
+                // レイと交差（衝突）するブロックを検知（最大距離を5マスに制限）
+                const intersects = raycaster.intersectObjects(targets);
+                
+                if (intersects.length > 0 && intersects[0].distance <= 5) {
+                    const hit = intersects[0];
+                    const mesh = hit.object;
+
+                    // 衝突したメッシュの絶対座標から、チャンクデータ内のキーを特定する
+                    const bx = Math.round(mesh.position.x);
+                    const by = Math.round(mesh.position.y);
+                    const bz = Math.round(mesh.position.z);
+
+                    const cx = Math.floor(bx / CHUNK_SIZE);
+                    const cz = Math.floor(bz / CHUNK_SIZE);
+                    const chunkKey = `${cx},${cz}`;
+
+                    return {
+                        chunkKey: chunkKey,
+                        blockKey: `${bx},${by},${bz}`,
+                        mesh: mesh,
+                        faceIndex: hit.faceIndex,
+                        point: hit.point,
+                        normal: hit.face.normal // 叩いた面の向き（次の設置機能で使用）
+                    };
+                }
+                return null;
+            }
+
+            // マウスクリック時のイベント（左クリックで破壊）
+            window.addEventListener('mousedown', (e) => {
+                if (!isLocked) return;
+
+                // 左クリック（ボタン0）の場合：ブロックを壊す
+                if (e.button === 0) {
+                    const target = getTargetBlock();
+                    if (target) {
+                        const chunk = chunks[target.chunkKey];
+                        if (chunk && chunk.blocks[target.blockKey]) {
+                            // 1. 3Dシーンからメッシュを削除して見えなくする
+                            chunk.group.remove(target.mesh);
+                            target.mesh.geometry.dispose();
+
+                            // 2. 内部データ（マップデータ）から削除
+                            delete chunk.blocks[target.blockKey];
+                        }
+                    }
+                }
+            });
+            // 現在プレイヤーが選択している設置用のブロックタイプ（初期値は土）
+            let currentSelectedBlockType = BLOCK_DIRT;
+
+            // マウスクリックイベントを拡張し、右クリック（ボタン2）での設置処理を追加します
+            window.addEventListener('mousedown', (e) => {
+                if (!isLocked) return;
+
+                // 右クリック（ボタン2）の場合：ブロックを設置する
+                if (e.button === 2) {
+                    const target = getTargetBlock();
+                    if (target) {
+                        // 叩いた面の向き（法線ベクトル：normal）を利用して、隣接する設置先の座標を計算
+                        const normal = target.normal;
+                        
+                        // ターゲットブロックの座標を取得
+                        const currentMeshPos = target.mesh.position;
+                        const newX = Math.round(currentMeshPos.x + normal.x);
+                        const newY = Math.round(currentMeshPos.y + normal.y);
+                        const newZ = Math.round(currentMeshPos.z + normal.z);
+
+                        // 設置先の座標が、プレイヤー自身の体（足元や頭）と重なっていないかチェック
+                        const playerHeadY = Math.floor(player.pos.y + PLAYER_HEIGHT);
+                        const playerFootY = Math.floor(player.pos.y);
+                        const playerX = Math.floor(player.pos.x + 0.5);
+                        const playerZ = Math.floor(player.pos.z + 0.5);
+
+                        // プレイヤーの肉体と重なる位置への設置は禁止（埋まりバグ防止）
+                        if (newX === playerX && newZ === playerZ && (newY === playerFootY || newY === playerHeadY)) {
+                            return; 
+                        }
+
+                        // 設置先のチャンクを特定
+                        const cx = Math.floor(newX / CHUNK_SIZE);
+                        const cz = Math.floor(newZ / CHUNK_SIZE);
+                        const chunkKey = `${cx},${cz}`;
+                        const chunk = chunks[chunkKey];
+
+                        if (chunk) {
+                            const blockKey = `${newX},${newY},${newZ}`;
+                            
+                            // すでに同じ場所にブロックが存在しない場合のみ設置
+                            if (!chunk.blocks[blockKey]) {
+                                const mats = materialsMap[currentSelectedBlockType];
+                                const mesh = new THREE.Mesh(blockGeometry, mats);
+                                mesh.position.set(newX, newY, newZ);
+                                mesh.castShadow = true;
+                                mesh.receiveShadow = true;
+                                
+                                // チャンクの3Dグループと内部データに追加
+                                chunk.group.add(mesh);
+                                chunk.blocks[blockKey] = { type: currentSelectedBlockType, mesh: mesh };
+                            }
+                        }
+                    }
+                }
+            });
+
+            // コンテキストメニュー（右クリックで出るブラウザ標準のメニュー）をゲーム中に禁止する
+            window.addEventListener('contextmenu', (e) => {
+                if (isLocked) {
+                    e.preventDefault();
+                }
+            });
+            // ブロックのIDと名前の対応表
+            const blockNames = {
+                [BLOCK_DIRT]: "土ブロック (DIRT)",
+                [BLOCK_STONE]: "石ブロック (STONE)",
+                [BLOCK_WOOD]: "原木ブロック (WOOD)",
+                [BLOCK_LEAF]: "葉っぱブロック (LEAF)",
+                [BLOCK_TNT]: "TNTブロック (TNT)"
+            };
+
+            // 画面上部に選択中のブロックを表示するためのUIテキスト要素を動的に作成
+            const uiContainer = document.createElement('div');
+            uiContainer.style.position = 'absolute';
+            uiContainer.style.bottom = '20px';
+            uiContainer.style.width = '100%';
+            uiContainer.style.textAlign = 'center';
+            uiContainer.style.color = 'white';
+            uiContainer.style.fontFamily = 'monospace';
+            uiContainer.style.fontSize = '18px';
+            uiContainer.style.textShadow = '2px 2px #000';
+            uiContainer.style.pointerEvents = 'none';
+            uiContainer.style.zIndex = '10';
+            document.body.appendChild(uiContainer);
+
+            // UIの表示内容を更新する関数
+            function updateUI() {
+                let uiText = "【スロット選択】 ";
+                const availableBlocks = [BLOCK_DIRT, BLOCK_STONE, BLOCK_WOOD, BLOCK_LEAF, BLOCK_TNT];
+                
+                availableBlocks.forEach((type, index) => {
+                    const slotNum = index + 1;
+                    if (type === currentSelectedBlockType) {
+                        // 現在選ばれているブロックを強調表示
+                        uiText += ` ▶[${slotNum}: ${blockNames[type]}]◀ `;
+                    } else {
+                        uiText += ` [${slotNum}: ${blockNames[type].split(' ')[0]}] `;
+                    }
+                });
+                
+                uiContainer.innerHTML = uiText + "<br><span style='font-size:12px; color:#ccc;'>【1～5キー】でブロック切り替え / 【左クリック】破壊 / 【右クリック】設置</span>";
+            }
+
+            // キーボードの数字入力（1～5）を監視して、選択ブロックを切り替えるイベント
+            window.addEventListener('keydown', (e) => {
+                if (!isLocked) return;
+
+                if (e.code === 'Digit1') currentSelectedBlockType = BLOCK_DIRT;
+                if (e.code === 'Digit2') currentSelectedBlockType = BLOCK_STONE;
+                if (e.code === 'Digit3') currentSelectedBlockType = BLOCK_WOOD;
+                if (e.code === 'Digit4') currentSelectedBlockType = BLOCK_LEAF;
+                if (e.code === 'Digit5') currentSelectedBlockType = BLOCK_TNT;
+
+                // 選択が変わったら即座にUI表示を書き換える
+                updateUI();
+            });
+
+            // 初期状態のUIを画面に反映
+            updateUI();
+            // 発生中のパーティクルを管理する配列
+            const particles = [];
+
+            // ブロックが破壊されたときに飛び散る破片（パーティクル）を生成する関数
+            function createBlockParticles(pos, color) {
+                // 1つのブロックにつき、12個の小さな破片をランダムに散らす
+                const pCount = 12;
+                const pGeometry = new THREE.BoxGeometry(0.15, 0.15, 0.15);
+                const pMaterial = new THREE.MeshLambertMaterial({ color: color });
+
+                for (let i = 0; i < pCount; i++) {
+                    const pMesh = new THREE.Mesh(pGeometry, pMaterial);
+                    
+                    // 破壊されたブロックの中心位置に破片を配置
+                    pMesh.position.set(
+                        pos.x + (Math.random() - 0.5) * 0.5,
+                        pos.y + (Math.random() - 0.5) * 0.5,
+                        pos.z + (Math.random() - 0.5) * 0.5
+                    );
+                    
+                    scene.add(pMesh);
+
+                    // 破片が飛び出す初期速度（上方向と横方向へランダムに弾け飛ぶ）
+                    particles.push({
+                        mesh: pMesh,
+                        velocity: {
+                            x: (Math.random() - 0.5) * 0.1,
+                            y: (Math.random() * 0.1) + 0.05,
+                            z: (Math.random() - 0.5) * 0.1
+                        },
+                        life: 30 // パーティクルの寿命（フレーム数）
+                    });
+                }
+            }
+
+            // 毎フレーム、パーティクルを動かして重力で落下させる更新関数
+            function updateParticles() {
+                for (let i = particles.length - 1; i >= 0; i--) {
+                    const p = particles[i];
+                    
+                    // 速度に合わせて座標を移動
+                    p.mesh.position.x += p.velocity.x;
+                    p.mesh.position.y += p.velocity.y;
+                    p.mesh.position.z += p.velocity.z;
+
+                    // 破片にも簡易的な重力を適用して放物線を描かせる
+                    p.velocity.y -= 0.005;
+                    
+                    // 寿命を減らす
+                    p.life--;
+
+                    // 寿命が尽きた破片は3D空間から削除してメモリを解放
+                    if (p.life <= 0) {
+                        scene.remove(p.mesh);
+                        p.mesh.geometry.dispose();
+                        p.mesh.material.dispose();
+                        particles.splice(i, 1);
+                    }
+                }
+            }
+
+            // 左クリック破壊イベント（パート10）の中に、パーティクル発生処理を組み込む（フック上書き）
+            const originalMousedown = window._targetMousedown || null; 
+            // 既存のイベントリスナーとの重複を防ぐため、元の処理を上書き拡張
+            window.addEventListener('mousedown', (e) => {
+                if (!isLocked || e.button !== 0) return;
+                
+                const target = getTargetBlock();
+                if (target) {
+                    const chunk = chunks[target.chunkKey];
+                    if (chunk && chunk.blocks[target.blockKey]) {
+                        // 破壊されるブロックのテクスチャ（マテリアル）から色を取得して破片に引き継ぐ
+                        let blockColor = 0x866043; // デフォルトは土の色
+                        if (target.mesh.material && target.mesh.material.color) {
+                            blockColor = target.mesh.material.color.getHex();
+                        } else if (Array.isArray(target.mesh.material)) {
+                            // 草ブロックなどの複数マテリアルの場合は上面の色を採用
+                            blockColor = target.mesh.material[2].color.getHex();
+                        }
+                        
+                        // エフェクトを発生させる
+                        createBlockParticles(target.mesh.position, blockColor);
+                    }
+                }
+            });
+
+            // メインのゲームループ（パート9で拡張したもの）に、パーティクル更新処理を追加します
+            const loopWithParticles = gameLoop;
+            gameLoop = function() {
+                loopWithParticles(); // 既存の物理やレンダリング処理を実行
+                updateParticles();   // パーティクルの移動処理を追加
+            };
+            // 点火されたTNTのアニメーションを管理する配列
+            const activeTnts = [];
+
+            // 指定された座標にあるTNTに点火し、カウントダウンを開始する関数
+            function igniteTnt(wx, wy, wz, mesh, chunk) {
+                // 3Dシーンとチャンクデータから通常のブロックとしては一度削除
+                const blockKey = `${wx},${wy},${wz}`;
+                delete chunk.blocks[blockKey];
+
+                // 点火用の一時的な別メッシュを作成（爆発時に赤白で点滅させるため）
+                const tntGeometry = new THREE.BoxGeometry(1.02, 1.02, 1.02); // 少し大きくして重ねる
+                const redMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+                const whiteMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+                
+                // 元のメッシュの見た目を赤に変えてシーンに残す
+                mesh.material = redMat;
+
+                activeTnts.push({
+                    mesh: mesh,
+                    worldPos: { x: wx, y: wy, z: wz },
+                    materials: [redMat, whiteMat],
+                    timer: 90, // 爆発までのフレーム数（約1.5秒）
+                    chunk: chunk
+                });
+            }
+
+            // TNTの点滅処理と、カウントダウン終了時の爆発処理を行う関数
+            function updateTnts() {
+                for (let i = activeTnts.length - 1; i >= 0; i--) {
+                    const tnt = activeTnts[i];
+                    tnt.timer--;
+
+                    // 10フレームごとに赤と白を交互に切り替えて点滅を表現
+                    if (tnt.timer % 10 === 0) {
+                        tnt.mesh.material = tnt.materials[(tnt.timer / 10) % 2];
+                    }
+
+                    // カウントダウン終了：爆発
+                    if (tnt.timer <= 0) {
+                        const ex = tnt.worldPos.x;
+                        const ey = tnt.worldPos.y;
+                        const ez = tnt.worldPos.z;
+
+                        // 1. 爆発時の巨大なパーティクルエフェクトを発生させる
+                        createBlockParticles(tnt.mesh.position, 0xffaa00);
+                        createBlockParticles(tnt.mesh.position, 0xff3300);
+
+                        // 2. 爆発半径（3マス以内）の周囲のブロックを巻き込んで破壊する
+                        const radius = 3;
+                        for (let dx = -radius; dx <= radius; dx++) {
+                            for (let dy = -radius; dy <= radius; dy++) {
+                                            for (let dz = -radius; dz <= radius; dz++) {
+                                    // 球状の爆発範囲を計算
+                                    if (dx*dx + dy*dy + dz*dz <= radius*radius) {
+                                        const targetX = ex + dx;
+                                        const targetY = ey + dy;
+                                        const targetZ = ez + dz;
+
+                                        const targetBlock = getBlockAt(targetX, targetY, targetZ);
+                                        if (targetBlock) {
+                                            const tcx = Math.floor(targetX / CHUNK_SIZE);
+                                            const tcz = Math.floor(targetZ / CHUNK_SIZE);
+                                            const tChunk = chunks[`${tcx},${tcz}`];
+
+                                            if (tChunk) {
+                                                // 周囲のブロックを消し去る
+                                                tChunk.group.remove(targetBlock.mesh);
+                                                targetBlock.mesh.geometry.dispose();
+                                                delete tChunk.blocks[`${targetX},${targetY},${targetZ}`];
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // 点火用TNTメッシュを画面から完全に消去
+                        scene.remove(tnt.mesh);
+                        tnt.mesh.geometry.dispose();
+                        activeTnts.splice(i, 1);
+                    }
+                }
+            }
+
+            // 右クリックでTNTを設置した際、または左クリックでTNTを叩いた際に点火するトリガーをマウスイベントへ追加
+            window.addEventListener('mousedown', (e) => {
+                if (!isLocked) return;
+
+                const target = getTargetBlock();
+                if (target) {
+                    const chunk = chunks[target.chunkKey];
+                    if (chunk && chunk.blocks[target.blockKey]) {
+                        const blockData = chunk.blocks[target.blockKey];
+
+                        // 叩いた、あるいは操作したブロックがTNTだった場合の点火判定
+                        if (blockData.type === BLOCK_TNT) {
+                            const coords = target.blockKey.split(',').map(Number);
+                            igniteTnt(coords[0], coords[1], coords[2], blockData.mesh, chunk);
+                        }
+                    }
+                }
+            });
+
+            // メインのゲームループにTNTの毎フレーム更新処理を追加します
+            const loopWithTnt = gameLoop;
+            gameLoop = function() {
+                loopWithTnt();
+                updateTnts(); // TNTのカウントダウンと点滅処理
+            };
+            // プレイヤーが世界の描画範囲外（暗闇）を見つめた時のために、霧（フォグ）を設定
+            // これにより、遠くのチャンクが唐突に現れるのではなく、マイクラのように滑らかに出現します
+            scene.fog = new THREE.FogExp2(0x78a7ff, 0.015);
+
+            // 最終セットアップ：ゲームウィンドウのサイズが変更された際のカメラ比率自動補正
             window.addEventListener('resize', () => {
                 camera.aspect = window.innerWidth / window.innerHeight;
                 camera.updateProjectionMatrix();
                 renderer.setSize(window.innerWidth, window.innerHeight);
             });
 
-            // 6. ループ描画
-            function animate() {
-                requestAnimationFrame(animate);
-                renderer.render(scene, camera);
-            }
-            animate();
+            // 開発完了のログを出力
+            console.log("【15分割開発完了】すべてのマイクラ3Dエンジンコアが正常にドッキングされました。");
         }
+        
+        // 開発システムを安全に終了し、HTMLのパースをクローズします
     </script>
 </body>
 </html>

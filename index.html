@@ -6,16 +6,16 @@
 <style>
   body { margin:0; overflow:hidden; background:#000; color:#fff; font-family:monospace; }
   #info { position: absolute; top:8px; left:8px; background:rgba(0,0,0,0.4); padding:8px; border-radius:4px; z-index:10; }
-  canvas { display:block; }
 </style>
 </head>
 <body>
 <div id="info">WASD move • Mouse look (click to lock) • J:Break • K:Place • R:regen</div>
 
 <script type="module">
-import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.154.0/build/three.module.js';
-import { PointerLockControls } from 'https://cdn.jsdelivr.net/npm/three@0.154.0/examples/jsm/controls/PointerLockControls.js';
-// CONFIG
+import * as THREE from 'https://cdn.skypack.dev/three@0.154.0';
+import { PointerLockControls } from 'https://cdn.skypack.dev/three@0.154.0/examples/jsm/controls/PointerLockControls.js';
+
+// --- (残りは前回と同じコード) ---
 const CHUNK_SIZE = 16;
 const WORLD_HEIGHT = 64;
 const RENDER_DISTANCE = 3;
@@ -34,7 +34,6 @@ const BLOCKS = {
   6: {name:'lava', tile:5},
 };
 
-// THREE init
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x87ceeb);
 const camera = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, 0.1, 1000);
@@ -42,28 +41,23 @@ const renderer = new THREE.WebGLRenderer({antialias:true});
 renderer.setSize(innerWidth, innerHeight);
 document.body.appendChild(renderer.domElement);
 
-// Lights
 const sun = new THREE.DirectionalLight(0xffffff, 1);
 sun.position.set(100,200,100);
 scene.add(sun);
 scene.add(new THREE.AmbientLight(0xffffff, 0.4));
 
-// Controls
 const controls = new PointerLockControls(camera, renderer.domElement);
 document.addEventListener('click', ()=> controls.lock(), false);
 scene.add(controls.getObject());
 
-// Movement
 const move = {forward:false,back:false,left:false,right:false};
 let speed = 6;
 
-// Resize
 window.addEventListener('resize', ()=> {
   camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
 });
 
-// Atlas canvas
 const atlasCanvas = document.createElement('canvas');
 atlasCanvas.width = TILE_SIZE * ATLAS_COLS;
 atlasCanvas.height = TILE_SIZE * ATLAS_ROWS;
@@ -95,9 +89,7 @@ const atlasTexture = new THREE.CanvasTexture(atlasCanvas);
 atlasTexture.magFilter = THREE.NearestFilter;
 atlasTexture.minFilter = THREE.NearestMipMapNearestFilter;
 
-// Helpers
 function key(cx,cy,cz){ return `${cx},${cy},${cz}`; }
-
 function pseudoNoise(x,z){
   const nx = x*0.08, nz = z*0.08;
   let v = Math.sin(nx*1.5 + nz*0.3)*0.5 + Math.cos(nx*0.4 - nz*0.7)*0.25;
@@ -261,7 +253,6 @@ controls.getObject().position.set(0, SEA_LEVEL+10, 0);
 camera.position.copy(controls.getObject().position);
 genAround(0,0);
 
-// Input
 document.addEventListener('keydown', (e)=>{
   if(e.code==='KeyW') move.forward=true;
   if(e.code==='KeyS') move.back=true;
@@ -285,7 +276,6 @@ document.addEventListener('keyup', (e)=>{
   if(e.code==='KeyD') move.right=false;
 });
 
-// Ray-based pick
 function pickBlock(maxDist=6){
   const origin = controls.getObject().position.clone();
   const dir = new THREE.Vector3(0,0,-1).applyQuaternion(controls.getObject().quaternion).normalize();
@@ -328,7 +318,6 @@ function actionPlace(){
   }
 }
 
-// Simple fluid tick
 function fluidTick(){
   const toSet = [];
   for(const [k,chunk] of chunks){
@@ -355,7 +344,6 @@ function fluidTick(){
   for(const s of toSet) setBlock(s.x,s.y,s.z,s.id);
 }
 
-// Animation
 const clock = new THREE.Clock();
 let fluidTimer = 0;
 function animate(){

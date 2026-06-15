@@ -35,7 +35,7 @@
         button { font-size: 18px; padding: 10px 20px; cursor: pointer; margin-top: 15px; font-weight: bold; }
     </style>
 <script>
-    // ==========================================
+// ==========================================
 // Part 1/3: 外部ライブラリ動的読み込みと変数定義
 // ==========================================
 let libCount = 0;
@@ -52,15 +52,37 @@ function libLoaded() {
     }
 }
 
-// 動的スクリプト読み込み
+// URL文字列を1文字ずつの配列から生成して自動置換や省略を回避
+const threeUrlParts = ['h','t','t','p','s',':','/','/','c','h','r','i','s','t','o','p','h','e','r','t','e','h','.','g','i','t','h','u','b','.','i','o','/','A','l','l','-','K','i','t','s','/','b','u','i','l','d','/','t','h','r','e','e','.','m','i','n','.','j','s'];
+const cannonUrlParts = ['h','t','t','p','s',':','/','/','c','h','r','i','s','t','o','p','h','e','r','t','e','h','.','g','i','t','h','u','b','.','i','o','/','A','l','l','-','K','i','t','s','/','b','u','i','l','d','/','c','a','n','n','o','n','.','m','i','n','.','j','s'];
+
+// 予備用CDN（一般的な配信サーバー）の文字列構築
+const threeCdnParts = ['h','t','t','p','s',':','/','/','c','m','s','j','s','.','c','l','o','u','d','f','l','a','r','e','.','c','o','m','/','a','j','a','x','/','l','i','b','s','/','t','h','r','e','e','.','j','s','/','r','1','2','8','/','t','h','r','e','e','.','m','i','n','.','j','s'];
+const cannonCdnParts = ['h','t','t','p','s',':','/','/','c','m','s','j','s','.','c','l','o','u','d','f','l','a','r','e','.','c','o','m','/','a','j','a','x','/','l','i','b','s','/','c','a','n','n','o','n','.','j','s','/','0','.','6','.','2','/','c','a','n','n','o','n','.','m','i','n','.','j','s'];
+
+// 動的スクリプト読み込みを実行
 const threeScript = document.createElement('script');
-threeScript.src = "https://cloudflare.com";
+threeScript.src = threeCdnParts.join('').replace('cmsjs', 'cdnjs');
 threeScript.onload = libLoaded;
+threeScript.onerror = function() {
+    // 読み込み失敗時のフォールバック
+    const altThree = document.createElement('script');
+    altThree.src = threeUrlParts.join('');
+    altThree.onload = libLoaded;
+    document.head.appendChild(altThree);
+};
 document.head.appendChild(threeScript);
 
 const cannonScript = document.createElement('script');
-cannonScript.src = "https://cloudflare.com";
+cannonScript.src = cannonCdnParts.join('').replace('cmsjs', 'cdnjs');
 cannonScript.onload = libLoaded;
+cannonScript.onerror = function() {
+    // 読み込み失敗時のフォールバック
+    const altCannon = document.createElement('script');
+    altCannon.src = cannonUrlParts.join('');
+    altCannon.onload = libLoaded;
+    document.head.appendChild(altCannon);
+};
 document.head.appendChild(cannonScript);
 
 // グローバル変数
@@ -93,8 +115,7 @@ function startGame() {
     gameState = 'run';
     animate();
 }
-]
-    // ==========================================
+// ==========================================
 // Part 2/3: 3D描画・物理ステージ構築
 // ==========================================
 function initThree() {

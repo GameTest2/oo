@@ -60,7 +60,7 @@
         const BLOCK_LAVA = 7;
 
         let currentSelectedBlockType = BLOCK_DIRT;
-        let isLocked = false; // マウスロック状態フラグを最上部で共有
+        let isLocked = false; 
 
         // どこから呼び出されてもバグらないように、名前データを最上部に定義
         const blockNames = {
@@ -71,6 +71,9 @@
             [BLOCK_WATER]: "水 (WATER)",
             [BLOCK_LAVA]: "溶岩 (LAVA)"
         };
+
+        // 後ろのパートで具体的に身を定義する関数たちを、あらかじめグローバル変数として宣言（前方宣言）
+        let initMaterials, initPointerLock, updateCameraRotation;
 
         // 地形＆洞窟＆溶岩湖用の高品質3Dパーリンノイズ
         const Perlin = {

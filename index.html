@@ -1,687 +1,422 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ja">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>極限軽量マイクラ3D（完全修正版）</title>
-    <style>
-        body { margin: 0; overflow: hidden; background-color: #84b0ff; font-family: sans-serif; user-select: none; }
-        #info {
-            position: absolute; top: 10px; width: 100%; text-align: center;
-            color: white; font-size: 14px; font-weight: bold; text-shadow: 2px 2px #000;
-            pointer-events: none; z-index: 10; line-height: 1.6;
-        }
-        #crosshair {
-            position: absolute; top: 50%; left: 50%; width: 10px; height: 10px;
-            transform: translate(-50%, -50%); color: white; font-size: 20px;
-            pointer-events: none; z-index: 10;
-        }
-    </style>
+<meta charset="utf-8" />
+<title>Voxel Demo (Creative) - J:Break K:Place</title>
+<style>
+  body { margin:0; overflow:hidden; background:#000; color:#fff; font-family:monospace; }
+  #info { position: absolute; top:8px; left:8px; background:rgba(0,0,0,0.4); padding:8px; border-radius:4px; }
+  canvas { display:block; }
+</style>
 </head>
 <body>
+<div id="info">WASD move • Mouse look (click to lock) • J:Break • K:Place • R:regen</div>
+<script src="https://cdn.jsdelivr.net/npm/three@0.154.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.154.0/examples/js/controls/PointerLockControls.js"></script>
+<script>
+// CONFIG
+const CHUNK_SIZE = 16;
+const WORLD_HEIGHT = 64;
+const RENDER_DISTANCE = 3; // chunks radius
+const SEA_LEVEL = 18;
+const TILE_SIZE = 16; // pixels per tile in atlas
+const ATLAS_COLS = 4; // number of tiles horizontally in atlas
+const ATLAS_ROWS = 2;
 
-    <div id="info">
-        極限軽量マイクラ3D (1 / 8分割統合ビルド)<br>
-        【操作】W,A,S,D: 移動 / スペース: ジャンプ / 1～6: ブロック選択 / J: 破壊 / K: 設置
-    </div>
-    <div id="crosshair">+</div>
+// BLOCK IDS
+const AIR = 0, GRASS = 1, DIRT = 2, STONE = 3, SAND = 4, WATER = 5, LAVA = 6;
+const BLOCKS = {
+  1: {name:'grass', tile:0},
+  2: {name:'dirt', tile:1},
+  3: {name:'stone', tile:2},
+  4: {name:'sand', tile:3},
+  5: {name:'water', tile:4},
+  6: {name:'lava', tile:5},
+};
 
-    <script>
-        // 暗号化URLによる自動読込（Googleブロックを完全回避）
-        (function() {
-            const encodedUrl = "aHR0cHM6Ly9jZG5qcy5jbG91ZGZsYXJlLmNvbS9hamF4L2xpYnMvdGhyZWUuanMvcjEyOC90aHJlZS5taW4uanM=";
-            const script = document.createElement('script');
-            script.src = atob(encodedUrl);
-            script.onload = () => { initGame(); };
-            document.head.appendChild(script);
-        })();
+// THREE init
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x87ceeb);
+const camera = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, 0.1, 1000);
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
 
-        // 全てのパーツで共有するグローバル変数を完全に定義（ReferenceError対策）
-        let scene, camera, renderer, blockGeometry;
-        const keys = {};
-        const player = { pos: { x: 0, y: 35, z: 0 }, rot: { x: 0, y: 0 }, speed: 0.15, velocity: { y: 0 }, isGrounded: false };
-        const chunks = {};
-        const instancedMeshes = {};
-        const materialsMap = {};
-        
-        const CHUNK_SIZE = 16;
-        const CHUNK_HEIGHT = 64;
-        const RENDER_DISTANCE = 3;
-        const WATER_LEVEL = 12;
-        const LAVA_LEVEL = 4;
+// Lights
+const sun = new THREE.DirectionalLight(0xffffff, 1);
+sun.position.set(100,200,100);
+scene.add(sun);
+scene.add(new THREE.AmbientLight(0xffffff, 0.4));
 
-        const BLOCK_AIR = 0;
-        const BLOCK_GRASS = 1;
-        const BLOCK_DIRT = 2;
-        const BLOCK_STONE = 3;
-        const BLOCK_WOOD = 4;
-        const BLOCK_LEAF = 5;
-        const BLOCK_WATER = 6;
-        const BLOCK_LAVA = 7;
+// Controls
+const controls = new THREE.PointerLockControls(camera, document.body);
+document.addEventListener('click', ()=> controls.lock(), false);
+scene.add(controls.getObject());
 
-        let currentSelectedBlockType = BLOCK_DIRT;
-        let isLocked = false; 
+// Simple movement vars
+const move = {forward:false,back:false,left:false,right:false};
+let speed = 6;
+let yawMouse = 0;
 
-        // どこから呼び出されてもバグらないように、名前データを最上部に定義
-        const blockNames = {
-            [BLOCK_DIRT]: "土 (DIRT)",
-            [BLOCK_STONE]: "石 (STONE)",
-            [BLOCK_WOOD]: "原木 (WOOD)",
-            [BLOCK_LEAF]: "葉 (LEAF)",
-            [BLOCK_WATER]: "水 (WATER)",
-            [BLOCK_LAVA]: "溶岩 (LAVA)"
-        };
+// Resize
+window.addEventListener('resize', ()=> {
+  camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
 
-        // 後ろのパートで具体的に身を定義する関数たちを、あらかじめグローバル変数として宣言（前方宣言）
-        let initMaterials, initPointerLock, updateCameraRotation;
+// Create texture atlas via canvas (pixel-art style)
+const atlasCanvas = document.createElement('canvas');
+atlasCanvas.width = TILE_SIZE * ATLAS_COLS;
+atlasCanvas.height = TILE_SIZE * ATLAS_ROWS;
+const actx = atlasCanvas.getContext('2d');
 
-        // 地形＆洞窟＆溶岩湖用の高品質3Dパーリンノイズ
-        const Perlin = {
-            p: new Uint8Array(512),
-            init: function() {
-                const src = Array.from({length: 256}, (_, i) => i);
-                for (let i = 255; i > 0; i--) {
-                    const j = Math.floor(Math.random() * (i + 1));
-                    const t = src[i]; src[i] = src[j]; src[j] = t;
-                }
-                for (let i = 0; i < 512; i++) this.p[i] = src[i & 255];
-            },
-            fade: t => t * t * t * (t * (t * 6 - 15) + 10),
-            lerp: (t, a, b) => a + t * (b - a),
-            grad: (hash, x, y, z) => {
-                const h = hash & 15;
-                const u = h < 8 ? x : y;
-                const v = h < 4 ? y : h === 12 || h === 14 ? x : z;
-                return ((h & 1) === 0 ? u : -u) + ((h & 2) === 0 ? v : -v);
-            },
-            noise: function(x, y, z) {
-                const X = Math.floor(x) & 255, Y = Math.floor(y) & 255, Z = Math.floor(z) & 255;
-                x -= Math.floor(x); y -= Math.floor(y); z -= Math.floor(z);
-                const u = this.fade(x), v = this.fade(y), w = this.fade(z);
-                const A = this.p[X]+Y, AA = this.p[A]+Z, AB = this.p[A+1]+Z, B = this.p[X+1]+Y, BA = this.p[B]+Z, BB = this.p[B+1]+Z;
-                return this.lerp(w, this.lerp(v, this.lerp(u, this.grad(this.p[AA], x, y, z), this.grad(this.p[BA], x-1, y, z)),
-                                                 this.grad(this.p[AB], x, y-1, z), this.grad(this.p[BB], x-1, y-1, z)),
-                                   this.lerp(v, this.lerp(u, this.grad(this.p[AA+1], x, y, z-1), this.grad(this.p[BA+1], x-1, y, z-1)),
-                                                 this.grad(this.p[AB+1], x, y-1, z-1), this.grad(this.p[BB+1], x-1, y-1, z-1)));
-            }
-        };
-        Perlin.init();
+function drawPixelTile(x,y,color){
+  actx.fillStyle=color;
+  actx.fillRect(x,y, TILE_SIZE, TILE_SIZE);
+  // simple darker edge to give block look
+  actx.fillStyle=shade(color, -0.12);
+  actx.fillRect(x+TILE_SIZE-2,y+TILE_SIZE-2,2,2);
+}
+function shade(hex, amt){
+  const c = parseInt(hex.slice(1),16);
+  let r = ((c>>16)&255), g=((c>>8)&255), b=(c&255);
+  r = Math.max(0,Math.min(255, Math.floor(r*(1+amt))));
+  g = Math.max(0,Math.min(255, Math.floor(g*(1+amt))));
+  b = Math.max(0,Math.min(255, Math.floor(b*(1+amt))));
+  return '#'+((1<<24)+(r<<16)+(g<<8)+b).toString(16).slice(1);
+}
 
-        // プロシージャルなドット絵テクスチャを作る関数
-        function createProceduralTexture(type) {
-            const canvas = document.createElement('canvas');
-            canvas.width = 16; canvas.height = 16;
-            const ctx = canvas.getContext('2d');
+// Tile colors
+drawPixelTile(0,0,'#6b8f3f'); // grass (tile 0)
+drawPixelTile(TILE_SIZE,0,'#7b4f2a'); // dirt (1)
+drawPixelTile(2*TILE_SIZE,0,'#8a8a8a'); // stone (2)
+drawPixelTile(3*TILE_SIZE,0,'#d9c98b'); // sand (3)
+drawPixelTile(0,TILE_SIZE,'#4ea7ff'); // water (4)
+drawPixelTile(TILE_SIZE,TILE_SIZE,'#ff6a00'); // lava (5)
 
-            for (let x = 0; x < 16; x++) {
-                for (let y = 0; y < 16; y++) {
-                    const rand = Math.random() * 0.15;
-                    let r, g, b;
+const atlasTexture = new THREE.CanvasTexture(atlasCanvas);
+atlasTexture.magFilter = THREE.NearestFilter;
+atlasTexture.minFilter = THREE.NearestMipMapNearestFilter;
 
-                    if (type === 'grass_top') {
-                        r = 91 / 255 - rand; g = 135 / 255 - rand; b = 49 / 255 - rand;
-                    } else if (type === 'dirt') {
-                        r = 134 / 255 - rand; g = 96 / 255 - rand; b = 67 / 255 - rand;
-                    } else if (type === 'stone') {
-                        const v = 0.45 - rand; r = v; g = v; b = v;
-                    } else if (type === 'wood') {
-                        r = 90 / 255 - rand; g = 67 / 255 - rand; b = 43 / 255 - rand;
-                    } else if (type === 'leaf') {
-                        r = 53 / 255 - rand; g = 96 / 255 - rand; b = 36 / 255 - rand;
-                    } else if (type === 'water') {
-                        r = 40 / 255; g = 100 / 255; b = 200 / 255 + rand;
-                    } else if (type === 'lava') {
-                        r = 230 / 255; g = 90 / 255 + rand; b = 20 / 255;
-                    }
+// Utility: 3D array key
+function key(cx,cy,cz){ return `${cx},${cy},${cz}`; }
 
-                    ctx.fillStyle = `rgb(${Math.floor(r * 255)}, ${Math.floor(g * 255)}, ${Math.floor(b * 255)})`;
-                    ctx.fillRect(x, y, 1, 1);
-                }
-            }
+// Simple Noise (Perlin-like) - use layered sine+random for lightweight
+function pseudoNoise(x,z){
+  const nx = x*0.08, nz = z*0.08;
+  let v = Math.sin(nx*1.5 + nz*0.3)*0.5 + Math.cos(nx*0.4 - nz*0.7)*0.25;
+  v += (Math.sin(nx*2.9 + nz*1.3)*0.12);
+  return v;
+}
 
-            if (type === 'grass_side') {
-                ctx.fillStyle = 'rgb(134, 96, 67)'; ctx.fillRect(0, 0, 16, 16);
-                for (let x = 0; x < 16; x++) {
-                    const h = 4 + Math.floor(Math.random() * 2);
-                    ctx.fillStyle = 'rgb(91, 135, 49)'; ctx.fillRect(x, 0, 1, h);
-                }
-            }
+// World data: chunk map from key-> {blocks: Uint8Array, mesh:Mesh}
+const chunks = new Map();
 
-            const texture = new THREE.CanvasTexture(canvas);
-            texture.magFilter = THREE.NearestFilter;
-            texture.minFilter = THREE.NearestFilter;
-            return texture;
+// Generate chunk at chunk coords (cx,cz)
+function generateChunk(cx, cz){
+  const blocks = new Uint8Array(CHUNK_SIZE * WORLD_HEIGHT * CHUNK_SIZE);
+  for(let x=0;x<CHUNK_SIZE;x++){
+    for(let z=0;z<CHUNK_SIZE;z++){
+      const wx = cx*CHUNK_SIZE + x;
+      const wz = cz*CHUNK_SIZE + z;
+      const n = pseudoNoise(wx,wz);
+      const height = Math.floor(SEA_LEVEL + n*8 + 4*Math.sin(wx*0.05)*Math.cos(wz*0.05));
+      for(let y=0;y<WORLD_HEIGHT;y++){
+        let id = AIR;
+        if(y<=height){
+          if(y > height-1) id = GRASS;
+          else if(y > height-4) id = DIRT;
+          else id = STONE;
+        } else if(y <= SEA_LEVEL && y<=height+1){
+          id = WATER;
         }
+        // beaches: if near sea level and top is sand
+        if(id === GRASS && height <= SEA_LEVEL+1) id = SAND;
+        // small lava pools below certain depth
+        if(y<5 && Math.random()<0.002) id = LAVA;
+        blocks[index(x,y,z)] = id;
+      }
+    }
+  }
+  const c = {blocks, mesh:null};
+  chunks.set(key(cx,0,cz), c);
+  buildChunkMesh(cx,cz);
+}
 
-        // 各ブロックのテクスチャを生成してマテリアルをマッピングする関数
-        function initMaterials() {
-            const texGrassTop = createProceduralTexture('grass_top');
-            const texGrassSide = createProceduralTexture('grass_side');
-            const texDirt = createProceduralTexture('dirt');
-            const texStone = createProceduralTexture('stone');
-            const texWood = createProceduralTexture('wood');
-            const texLeaf = createProceduralTexture('leaf');
-            const texWater = createProceduralTexture('water');
-            const texLava = createProceduralTexture('lava');
+// index helper
+function index(x,y,z){ return (y*CHUNK_SIZE + z)*CHUNK_SIZE + x; }
 
-            const makeMat = (tex) => new THREE.MeshLambertMaterial({ map: tex });
-            const makeFluidMat = (tex) => new THREE.MeshLambertMaterial({ map: tex, transparent: true, opacity: 0.8 });
+// Return block id or AIR if out of bounds/chunk missing
+function getBlock(wx,wy,wz){
+  const cx = Math.floor(wx/CHUNK_SIZE);
+  const cz = Math.floor(wz/CHUNK_SIZE);
+  const lx = ((wx%CHUNK_SIZE)+CHUNK_SIZE)%CHUNK_SIZE;
+  const lz = ((wz%CHUNK_SIZE)+CHUNK_SIZE)%CHUNK_SIZE;
+  const chunk = chunks.get(key(cx,0,cz));
+  if(!chunk) return AIR;
+  if(wy<0 || wy>=WORLD_HEIGHT) return AIR;
+  return chunk.blocks[index(lx,wy,lz)];
+}
 
-            materialsMap[BLOCK_GRASS] = [makeMat(texGrassSide), makeMat(texGrassSide), makeMat(texGrassTop), makeMat(texDirt), makeMat(texGrassSide), makeMat(texGrassSide)];
-            materialsMap[BLOCK_DIRT] = Array(6).fill(makeMat(texDirt));
-            materialsMap[BLOCK_STONE] = Array(6).fill(makeMat(texStone));
-            materialsMap[BLOCK_WOOD] = Array(6).fill(makeMat(texWood));
-            materialsMap[BLOCK_LEAF] = Array(6).fill(makeMat(texLeaf));
-            materialsMap[BLOCK_WATER] = Array(6).fill(makeFluidMat(texWater));
-            materialsMap[BLOCK_LAVA] = Array(6).fill(new THREE.MeshBasicMaterial({ map: texLava }));
+function setBlock(wx,wy,wz,id){
+  const cx = Math.floor(wx/CHUNK_SIZE);
+  const cz = Math.floor(wz/CHUNK_SIZE);
+  const lx = ((wx%CHUNK_SIZE)+CHUNK_SIZE)%CHUNK_SIZE;
+  const lz = ((wz%CHUNK_SIZE)+CHUNK_SIZE)%CHUNK_SIZE;
+  const chunk = chunks.get(key(cx,0,cz));
+  if(!chunk) return;
+  if(wy<0 || wy>=WORLD_HEIGHT) return;
+  chunk.blocks[index(lx,wy,lz)] = id;
+  buildChunkMesh(cx,cz);
+}
+
+// Build mesh for chunk (simple face culling)
+function buildChunkMesh(cx, cz){
+  const chunk = chunks.get(key(cx,0,cz));
+  if(!chunk) return;
+  if(chunk.mesh){
+    scene.remove(chunk.mesh);
+    chunk.mesh.geometry.dispose();
+    chunk.mesh.material.dispose();
+    chunk.mesh = null;
+  }
+  const geometry = new THREE.BufferGeometry();
+  const positions = [];
+  const normals = [];
+  const uvs = [];
+  const indices = [];
+  let vertIndex = 0;
+
+  function pushFace(px,py,pz, nx,ny,nz, w,h, tileIndex){
+    // w,h in blocks (w and h always 1 here)
+    // face quad vertices
+    const du = (tileIndex % ATLAS_COLS) * TILE_SIZE / (TILE_SIZE*ATLAS_COLS);
+    const dv = Math.floor(tileIndex / ATLAS_COLS) * TILE_SIZE / (TILE_SIZE*ATLAS_ROWS);
+    const su = 1/ATLAS_COLS, sv = 1/ATLAS_ROWS;
+    // quad
+    const vx = [
+      [px,py,pz],
+      [px+ (nx===0? (ny===0?1:0) :0), py + (ny===0? (nz===0?1:0):0), pz + (nz===0? (nx===0?1:0):0)], // filler: we construct faces per known axis below
+    ];
+    // We'll add vertices per-face by direction explicit
+    const v = faceCorners(px,py,pz,nx,ny,nz);
+    for(let i=0;i<4;i++){
+      positions.push(...v[i]);
+      normals.push(nx,ny,nz);
+    }
+    // UVs (simple)
+    uvs.push(du, dv+sv);
+    uvs.push(du+su, dv+sv);
+    uvs.push(du+su, dv);
+    uvs.push(du, dv);
+    indices.push(vertIndex, vertIndex+1, vertIndex+2, vertIndex, vertIndex+2, vertIndex+3);
+    vertIndex +=4;
+  }
+
+  // returns 4 corners for face depending on normal
+  function faceCorners(x,y,z,nx,ny,nz){
+    const s = 1;
+    if(nx===1) return [[x+1,y,z],[x+1,y,z+1],[x+1,y+1,z+1],[x+1,y+1,z]];
+    if(nx===-1) return [[x,y,z+1],[x,y,z],[x,y+1,z],[x,y+1,z+1]];
+    if(nz===1) return [[x+1,y,z+1],[x,y,z+1],[x,y+1,z+1],[x+1,y+1,z+1]];
+    if(nz===-1) return [[x,y,z],[x+1,y,z],[x+1,y+1,z],[x,y+1,z]];
+    if(ny===1) return [[x,y+1,z],[x+1,y+1,z],[x+1,y+1,z+1],[x,y+1,z+1]];
+    if(ny===-1) return [[x,y,z+1],[x+1,y,z+1],[x+1,y,z],[x,y,z]];
+    return [[x,y,z],[x+1,y,z],[x+1,y+1,z+1],[x,y+1,z+1]];
+  }
+
+  for(let x=0;x<CHUNK_SIZE;x++){
+    for(let z=0;z<CHUNK_SIZE;z++){
+      for(let y=0;y<WORLD_HEIGHT;y++){
+        const id = chunk.blocks[index(x,y,z)];
+        if(id===AIR) continue;
+        const wx = cx*CHUNK_SIZE + x;
+        const wy = y;
+        const wz = cz*CHUNK_SIZE + z;
+        // six neighbors
+        const npos = [
+          [wx+1,wy,wz,1,0,0],
+          [wx-1,wy,wz,-1,0,0],
+          [wx,wy+1,wz,0,1,0],
+          [wx,wy-1,wz,0,-1,0],
+          [wx,wy,wz+1,0,0,1],
+          [wx,wy,wz-1,0,0,-1],
+        ];
+        for(const nb of npos){
+          const nbid = getBlock(nb[0],nb[1],nb[2]);
+          // water & lava should show faces against air and against different fluids (simple)
+          const show = (nbid===AIR) || (isFluid(id) && nbid!==id && nbid!==AIR);
+          if(show){
+            // choose tile index per block
+            const tile = (BLOCKS[id] && BLOCKS[id].tile != null) ? BLOCKS[id].tile : 0;
+            pushFace(wx,wy,wz, nb[3],nb[4],nb[5],1,1,tile);
+          }
         }
+      }
+    }
+  }
 
-        // 地形、洞窟、水、溶岩湖を内包した3次元チャンクデータを生成する関数
-        function generateChunkData(cx, cz) {
-            const data = new Uint8Array(CHUNK_SIZE * CHUNK_SIZE * CHUNK_HEIGHT);
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions,3));
+  geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals,3));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs,2));
+  geometry.setIndex(indices);
+  geometry.computeBoundingSphere();
 
-            for (let x = 0; x < CHUNK_SIZE; x++) {
-                for (let z = 0; z < CHUNK_SIZE; z++) {
-                    const worldX = cx * CHUNK_SIZE + x;
-                    const worldZ = cz * CHUNK_SIZE + z;
+  const mat = new THREE.MeshLambertMaterial({map:atlasTexture, transparent:true, alphaTest:0.5});
+  const mesh = new THREE.Mesh(geometry, mat);
+  mesh.position.set(cx*CHUNK_SIZE,0,cz*CHUNK_SIZE);
+  scene.add(mesh);
+  chunk.mesh = mesh;
+}
 
-                    // 地表のなだらかな高低差ノイズ
-                    const nA = Perlin.noise(worldX * 0.015, 0, worldZ * 0.015) * 20;
-                    const nB = Perlin.noise(worldX * 0.06, 0, worldZ * 0.06) * 6;
-                    const surfaceHeight = Math.floor(nA + nB) + 24;
+// fluid helper
+function isFluid(id){ return id===WATER || id===LAVA; }
 
-                    for (let y = 0; y < CHUNK_HEIGHT; y++) {
-                        const idx = x + (z * CHUNK_SIZE) + (y * CHUNK_SIZE * CHUNK_SIZE);
-                        
-                        if (y === 0) {
-                            data[idx] = BLOCK_STONE; // 最下層は岩盤
-                            continue;
-                        }
+// Generate initial world around (0,0)
+function genAround(px,pz){
+  const pcx = Math.floor(px/CHUNK_SIZE);
+  const pcz = Math.floor(pz/CHUNK_SIZE);
+  for(let dx=-RENDER_DISTANCE; dx<=RENDER_DISTANCE; dx++){
+    for(let dz=-RENDER_DISTANCE; dz<=RENDER_DISTANCE; dz++){
+      const cx = pcx+dx, cz = pcz+dz;
+      if(!chunks.has(key(cx,0,cz))) generateChunk(cx,cz);
+    }
+  }
+}
 
-                        let blockType = BLOCK_AIR;
+// Player start
+controls.getObject().position.set(0, SEA_LEVEL+10, 0);
+camera.position.copy(controls.getObject().position);
+genAround(0,0);
 
-                        if (y <= surfaceHeight) {
-                            if (y === surfaceHeight) {
-                                blockType = (y >= WATER_LEVEL) ? BLOCK_GRASS : BLOCK_DIRT;
-                            } else if (y > surfaceHeight - 4) {
-                                blockType = BLOCK_DIRT;
-                            } else {
-                                blockType = BLOCK_STONE;
-                            }
-                        }
+// Input
+document.addEventListener('keydown', (e)=>{
+  if(e.code==='KeyW') move.forward=true;
+  if(e.code==='KeyS') move.back=true;
+  if(e.code==='KeyA') move.left=true;
+  if(e.code==='KeyD') move.right=true;
+  if(e.code==='KeyR'){ // regen
+    for(const k of chunks.keys()) {
+      const c = chunks.get(k);
+      if(c.mesh){ scene.remove(c.mesh); c.mesh.geometry.dispose(); c.mesh.material.dispose(); }
+    }
+    chunks.clear();
+    genAround(controls.getObject().position.x, controls.getObject().position.z);
+  }
+  if(e.code==='KeyJ') actionBreak();
+  if(e.code==='KeyK') actionPlace();
+});
+document.addEventListener('keyup', (e)=>{
+  if(e.code==='KeyW') move.forward=false;
+  if(e.code==='KeyS') move.back=false;
+  if(e.code==='KeyA') move.left=false;
+  if(e.code==='KeyD') move.right=false;
+});
 
-                        // 3Dノイズによる地下洞窟の空洞化
-                        if (blockType === BLOCK_STONE || blockType === BLOCK_DIRT) {
-                            const caveNoise = Perlin.noise(worldX * 0.08, y * 0.12, worldZ * 0.08);
-                            if (caveNoise > 0.35) {
-                                blockType = BLOCK_AIR;
-                            }
-                        }
+// Raycast helper to find target block in front (maxDist)
+const raycaster = new THREE.Raycaster();
+function pickBlock(maxDist=6){
+  const origin = controls.getObject().position.clone();
+  const dir = new THREE.Vector3(0,0,-1).applyQuaternion(controls.getObject().quaternion).normalize();
+  for(let d=0.2; d<=maxDist; d+=0.2){
+    const px = Math.floor(origin.x + dir.x * d);
+    const py = Math.floor(origin.y + dir.y * d);
+    const pz = Math.floor(origin.z + dir.z * d);
+    const id = getBlock(px,py,pz);
+    if(id!==AIR) return {x:px,y:py,z:pz,id};
+  }
+  return null;
+}
 
-                        // 海や湖（水面）の自動配置
-                        if (blockType === BLOCK_AIR && y <= WATER_LEVEL && y > surfaceHeight) {
-                            blockType = BLOCK_WATER;
-                        }
+// Break block (J)
+function actionBreak(){
+  const hit = pickBlock(6);
+  if(!hit) return;
+  setBlock(hit.x,hit.y,hit.z, AIR);
+}
 
-                        // 地下深くの洞窟の底に溜まる溶岩湖の自動配置
-                        if (blockType === BLOCK_AIR && y <= LAVA_LEVEL) {
-                            blockType = BLOCK_LAVA;
-                        }
+// Place block (K) -> place grass block adjacent to face we looked at (place in front of hit)
+function actionPlace(){
+  const hit = pickBlock(6);
+  const origin = controls.getObject().position.clone();
+  const dir = new THREE.Vector3(0,0,-1).applyQuaternion(controls.getObject().quaternion).normalize();
+  if(hit){
+    // find empty adjacent cell along ray slightly past the hit point
+    for(let d=0.2; d<=6; d+=0.2){
+      const px = Math.floor(origin.x + dir.x * d);
+      const py = Math.floor(origin.y + dir.y * d);
+      const pz = Math.floor(origin.z + dir.z * d);
+      const id = getBlock(px,py,pz);
+      if(id===AIR){
+        setBlock(px,py,pz, GRASS);
+        return;
+      }
+    }
+  } else {
+    // place in front if no hit
+    const px = Math.floor(origin.x + dir.x * 3);
+    const py = Math.floor(origin.y + dir.y * 3);
+    const pz = Math.floor(origin.z + dir.z * 3);
+    if(getBlock(px,py,pz)===AIR) setBlock(px,py,pz, GRASS);
+  }
+}
 
-                        data[idx] = blockType;
-                    }
-                }
+// simple animation: water/lava "flow" (very naive) - spread down then out
+function fluidTick(){
+  const toSet = [];
+  for(const [k,chunk] of chunks){
+    // iterate blocks
+    for(let x=0;x<CHUNK_SIZE;x++) for(let z=0;z<CHUNK_SIZE;z++) for(let y=0;y<WORLD_HEIGHT;y++){
+      const id = chunk.blocks[index(x,y,z)];
+      if(id===WATER || id===LAVA){
+        const wx = parseInt(k.split(',')[0])*CHUNK_SIZE + x;
+        const wz = parseInt(k.split(',')[2])*CHUNK_SIZE + z;
+        const below = getBlock(wx,y-1,wz);
+        if(below===AIR){
+          toSet.push({x:wx,y:y-1,z:wz,id:id});
+        } else {
+          const dirs = [[1,0],[ -1,0],[0,1],[0,-1]];
+          for(const d of dirs){
+            const nx = wx+d[0], nz = wz+d[1];
+            if(getBlock(nx,y,nz)===AIR){
+              // occasional spread
+              if(Math.random()<0.02) toSet.push({x:nx,y:y,z:nz,id:id});
             }
-            // 16×16×64のチャンク内において木を植え込む内部スキャン処理
-            for (let x = 2; x < CHUNK_SIZE - 2; x++) {
-                for (let z = 2; z < CHUNK_SIZE - 2; z++) {
-                    if (Math.random() < 0.015) {
-                        let surfaceY = -1;
-                        for (let y = CHUNK_HEIGHT - 1; y >= 0; y--) {
-                            const idx = x + (z * CHUNK_SIZE) + (y * CHUNK_SIZE * CHUNK_SIZE);
-                            if (data[idx] !== BLOCK_AIR) {
-                                surfaceY = y;
-                                break;
-                            }
-                        }
-
-                        // 最表面が草かつ水面より上の適正地なら木を生成
-                        if (surfaceY !== -1 && surfaceY >= WATER_LEVEL) {
-                            const checkIdx = x + (z * CHUNK_SIZE) + (surfaceY * CHUNK_SIZE * CHUNK_SIZE);
-                            if (data[checkIdx] === BLOCK_GRASS) {
-                                const treeHeight = Math.floor(Math.random() * 2) + 4;
-
-                                // 幹（WOOD）の設置
-                                for (let i = 0; i < treeHeight; i++) {
-                                    const y = surfaceY + 1 + i;
-                                    if (y < CHUNK_HEIGHT) {
-                                        const idxW = x + (z * CHUNK_SIZE) + (y * CHUNK_SIZE * CHUNK_SIZE);
-                                        data[idxW] = BLOCK_WOOD;
-                                    }
-                                }
-
-                                // 葉（LEAF）の設置
-                                const leafTopY = surfaceY + treeHeight;
-                                for (let ly = leafTopY - 1; ly <= leafTopY + 1; ly++) {
-                                    if (ly >= CHUNK_HEIGHT || ly < 0) continue;
-                                    const radius = (ly === leafTopY + 1) ? 1 : 2;
-
-                                    for (let lx = -radius; lx <= radius; lx++) {
-                                        const wx = x + lx;
-                                        for (let lz = -radius; lz <= radius; lz++) {
-                                            const wz = z + lz;
-                                            if (Math.abs(lx) === radius && Math.abs(lz) === radius && radius > 1) {
-                                                if (Math.random() < 0.4) continue;
-                                            }
-                                            const idxL = wx + (wz * CHUNK_SIZE) + (ly * CHUNK_SIZE * CHUNK_SIZE);
-                                            if (data[idxL] === BLOCK_AIR) {
-                                                data[idxL] = BLOCK_LEAF;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            return data;
+          }
         }
+      }
+    }
+  }
+  for(const s of toSet) setBlock(s.x,s.y,s.z,s.id);
+}
 
-        // 指定座標のブロックIDを変更する共通関数
-        function setBlockAt(wx, wy, wz, blockType) {
-            const cx = Math.floor(wx / CHUNK_SIZE);
-            const cz = Math.floor(wz / CHUNK_SIZE);
-            const chunkKey = `${cx},${cz}`;
-            const chunk = chunks[chunkKey];
+// Player movement update
+const clock = new THREE.Clock();
+let fluidTimer = 0;
+function animate(){
+  requestAnimationFrame(animate);
+  const dt = clock.getDelta();
+  // movement
+  const dir = new THREE.Vector3();
+  if(move.forward) dir.z -= 1;
+  if(move.back) dir.z += 1;
+  if(move.left) dir.x -=1;
+  if(move.right) dir.x +=1;
+  dir.normalize().applyQuaternion(controls.getObject().quaternion);
+  controls.getObject().position.addScaledVector(dir, speed * dt);
+  camera.position.copy(controls.getObject().position);
 
-            if (chunk) {
-                const lx = ((Math.floor(wx) % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
-                const lz = ((Math.floor(wz) % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
-                const ly = Math.floor(wy);
+  // regen nearby chunks if needed
+  genAround(controls.getObject().position.x, controls.getObject().position.z);
 
-                if (ly >= 0 && ly < CHUNK_HEIGHT) {
-                    const idx = lx + (lz * CHUNK_SIZE) + (ly * CHUNK_SIZE * CHUNK_SIZE);
-                    chunk.data[idx] = blockType;
-                    return true;
-                }
-            }
-            return false;
-        }
+  // fluid tick
+  fluidTimer += dt;
+  if(fluidTimer > 0.5){ fluidTick(); fluidTimer = 0; }
 
-        // 指定座標のブロックIDを読み取る共通関数
-        function getBlockAt(wx, wy, wz) {
-            const cx = Math.floor(wx / CHUNK_SIZE);
-            const cz = Math.floor(wz / CHUNK_SIZE);
-            const chunkKey = `${cx},${cz}`;
-            const chunk = chunks[chunkKey];
+  renderer.render(scene, camera);
+}
+animate();
 
-            if (chunk) {
-                const lx = ((Math.floor(wx) % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
-                const lz = ((Math.floor(wz) % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
-                const ly = Math.floor(wy);
-
-                if (ly >= 0 && ly < CHUNK_HEIGHT) {
-                    const idx = lx + (lz * CHUNK_SIZE) + (ly * CHUNK_SIZE * CHUNK_SIZE);
-                    return chunk.data[idx];
-                }
-            }
-            return BLOCK_AIR;
-        }
-        // 読み込まれているすべてのチャンクから画面上の3Dブロックを高速一括生成する関数
-        function rebuildWorldRender() {
-            // 既存の古いInstancedMeshをすべてクリアしてメモリ解放
-            for (const type in instancedMeshes) {
-                scene.remove(instancedMeshes[type]);
-                instancedMeshes[type].dispose();
-                delete instancedMeshes[type];
-            }
-
-            const blockCounts = {};
-            const blockPositions = {};
-
-            for (const type in materialsMap) {
-                blockCounts[type] = 0;
-                blockPositions[type] = [];
-            }
-
-            // 全チャンクの有効ブロックをカウントして座標を格納
-            for (const chunkKey in chunks) {
-                const chunk = chunks[chunkKey];
-                const cx = chunk.cx;
-                const cz = chunk.cz;
-                const data = chunk.data;
-
-                for (let x = 0; x < CHUNK_SIZE; x++) {
-                    for (let z = 0; z < CHUNK_SIZE; z++) {
-                        for (let y = 0; y < CHUNK_HEIGHT; y++) {
-                            const idx = x + (z * CHUNK_SIZE) + (y * CHUNK_SIZE * CHUNK_SIZE);
-                            const blockType = data[idx];
-
-                            if (blockType !== BLOCK_AIR && blockCounts[blockType] !== undefined) {
-                                const worldX = cx * CHUNK_SIZE + x;
-                                const worldZ = cz * CHUNK_SIZE + z;
-
-                                blockCounts[blockType]++;
-                                blockPositions[blockType].push({ x: worldX, y: y, z: worldZ });
-                            }
-                        }
-                    }
-                }
-            }
-
-            // ブロックタイプごとにInstancedMeshを新しくビルド
-            const dummy = new THREE.Object3D();
-            
-            for (const type in blockCounts) {
-                const count = blockCounts[type];
-                if (count === 0) continue;
-
-                const mats = materialsMap[type];
-                const iMesh = new THREE.InstancedMesh(blockGeometry, mats, count);
-                
-                for (let i = 0; i < count; i++) {
-                    const pos = blockPositions[type][i];
-                    dummy.position.set(pos.x, pos.y, pos.z);
-                    dummy.updateMatrix();
-                    iMesh.setMatrixAt(i, dummy.matrix);
-                }
-
-                iMesh.instanceMatrix.needsUpdate = true;
-                scene.add(iMesh);
-                instancedMeshes[type] = iMesh;
-            }
-        }
-
-        // プレイヤーの移動に合わせて周辺チャンクを自動的に生成・破棄する関数
-        function updateInfiniteChunks() {
-            const currentChunkX = Math.floor(player.pos.x / CHUNK_SIZE);
-            const currentChunkZ = Math.floor(player.pos.z / CHUNK_SIZE);
-
-            let isWorldChanged = false;
-            const activeChunkKeys = new Set();
-
-            for (let x = -RENDER_DISTANCE; x <= RENDER_DISTANCE; x++) {
-                for (let z = -RENDER_DISTANCE; z <= RENDER_DISTANCE; z++) {
-                    const targetCX = currentChunkX + x;
-                    const targetCZ = currentChunkZ + z;
-                    const chunkKey = `${targetCX},${targetCZ}`;
-                    activeChunkKeys.add(chunkKey);
-
-                    if (!chunks[chunkKey]) {
-                        const chunkData = generateChunkData(targetCX, targetCZ);
-                        chunks[chunkKey] = { cx: targetCX, cz: targetCZ, data: chunkData };
-                        isWorldChanged = true;
-                    }
-                }
-            }
-
-            for (const key in chunks) {
-                if (!activeChunkKeys.has(key)) {
-                    delete chunks[key];
-                    isWorldChanged = true;
-                }
-            }
-
-            if (isWorldChanged) {
-                rebuildWorldRender();
-            }
-        }
-        // 画面中央の照準からレイ（光線）を飛ばしてターゲットブロックを検知する関数
-        function raycastFromCursor() {
-            const raycaster = new THREE.Raycaster();
-            const centerMouse = new THREE.Vector2(0, 0);
-            raycaster.setFromCamera(centerMouse, camera);
-
-            const targets = Object.values(instancedMeshes);
-            const intersects = raycaster.intersectObjects(targets);
-
-            if (intersects.length > 0 && intersects.distance <= 5) {
-                const hit = intersects[0];
-                const hitPoint = hit.point;
-                const normal = hit.face.normal;
-                
-                // 破壊用に面の内側の座標を計算
-                const destroyX = Math.floor(hitPoint.x - normal.x * 0.1);
-                const destroyY = Math.floor(hitPoint.y - normal.y * 0.1);
-                const destroyZ = Math.floor(hitPoint.z - normal.z * 0.1);
-
-                // 設置用に面の外側の座標を計算
-                const buildX = Math.floor(hitPoint.x + normal.x * 0.1);
-                const buildY = Math.floor(hitPoint.y + normal.y * 0.1);
-                const buildZ = Math.floor(hitPoint.z + normal.z * 0.1);
-
-                return {
-                    destroyPos: { x: destroyX, y: destroyY, z: destroyZ },
-                    buildPos: { x: buildX, y: buildY, z: buildZ }
-                };
-            }
-            return null;
-        }
-
-        // キーバインドによる破壊・建築の統合イベント
-        window.addEventListener('keydown', (e) => {
-            if (!isLocked) return;
-
-            // 【Jキー】で前方破壊
-            if (e.code === 'KeyJ') {
-                const target = raycastFromCursor();
-                if (target) {
-                    const success = setBlockAt(target.destroyPos.x, target.destroyPos.y, target.destroyPos.z, BLOCK_AIR);
-                    if (success) {
-                        rebuildWorldRender();
-                    }
-                }
-            }
-
-            // 【Kキー】で前方設置
-            if (e.code === 'KeyK') {
-                const target = raycastFromCursor();
-                if (target) {
-                    const bp = target.buildPos;
-
-                    // プレイヤー自身の当たり判定（肉体との重なりチェック）
-                    const pFootX = Math.floor(player.pos.x);
-                    const pFootY = Math.floor(player.pos.y);
-                    const pFootZ = Math.floor(player.pos.z);
-                    const pHeadY = Math.floor(player.pos.y + PLAYER_HEIGHT);
-
-                    if (bp.x === pFootX && bp.z === pFootZ && (bp.y === pFootY || bp.y === pHeadY)) {
-                        return; // 肉体に埋まる位置への設置は禁止
-                    }
-
-                    const success = setBlockAt(bp.x, bp.y, bp.z, currentSelectedBlockType);
-                    if (success) {
-                        rebuildWorldRender();
-                    }
-                }
-            }
-        });
-        const GRAVITY = -0.007;
-        const TERMINAL_VELOCITY = -0.3;
-        const JUMP_FORCE = 0.125;
-        const PLAYER_HEIGHT = 1.6;
-
-        // プレイヤーに重力を適用し、足元のブロックデータと衝突判定を行う関数
-        function applyPhysics() {
-            player.velocity.y += GRAVITY;
-            if (player.velocity.y < TERMINAL_VELOCITY) {
-                player.velocity.y = TERMINAL_VELOCITY;
-            }
-
-            const nextY = player.pos.y + player.velocity.y;
-            const blockBelow = getBlockAt(player.pos.x, nextY, player.pos.z);
-
-            if (blockBelow !== BLOCK_AIR && blockBelow !== BLOCK_WATER && blockBelow !== BLOCK_LAVA) {
-                const blockTopY = Math.floor(nextY) + 1;
-                if (player.pos.y >= blockTopY) {
-                    player.pos.y = blockTopY;
-                    player.velocity.y = 0;
-                    player.isGrounded = true;
-                    return;
-                }
-            }
-
-            player.pos.y = nextY;
-            player.isGrounded = false;
-
-            if (player.pos.y < 0) {
-                player.pos.x = 0; player.pos.z = 0; player.pos.y = 35;
-                player.velocity.y = 0;
-            }
-        }
-
-        // キー入力から次の移動座標を計算して段差を乗り越える関数
-        function updatePlayerMovement() {
-            const oldX = player.pos.x;
-            const oldZ = player.pos.z;
-            const moveVector = new THREE.Vector3(0, 0, 0);
-
-            if (keys['KeyW'] || keys['ArrowUp']) moveVector.z -= 1;
-            if (keys['KeyS'] || keys['ArrowDown']) moveVector.z += 1;
-            if (keys['KeyA'] || keys['ArrowLeft']) moveVector.x -= 1;
-            if (keys['KeyD'] || keys['ArrowRight']) moveVector.x += 1;
-
-            moveVector.normalize();
-
-            const angle = player.rot.y;
-            const changeX = moveVector.x * Math.cos(angle) + moveVector.z * Math.sin(angle);
-            const changeZ = moveVector.z * Math.cos(angle) - moveVector.x * Math.sin(angle);
-
-            player.pos.x += changeX * player.speed;
-            player.pos.z += changeZ * player.speed;
-
-            if (keys['Space'] && player.isGrounded) {
-                player.velocity.y = JUMP_FORCE;
-                player.isGrounded = false;
-            }
-
-            // 自動段差登り（ステップアップ）判定
-            const checkY = player.pos.y + 0.4;
-            const blockInWay = getBlockAt(player.pos.x, checkY, player.pos.z);
-
-            if (blockInWay !== BLOCK_AIR && blockInWay !== BLOCK_WATER && blockInWay !== BLOCK_LAVA) {
-                const blockAboveWay = getBlockAt(player.pos.x, checkY + 1.0, player.pos.z);
-                if (blockAboveWay === BLOCK_AIR || blockAboveWay === BLOCK_WATER || blockAboveWay === BLOCK_LAVA) {
-                    const stepTargetY = Math.floor(checkY) + 1;
-                    if (stepTargetY - player.pos.y <= 1.05) {
-                        player.pos.y = stepTargetY;
-                        player.velocity.y = 0;
-                        player.isGrounded = true;
-                    }
-                } else {
-                    player.pos.x = oldX;
-                    player.pos.z = oldZ;
-                }
-            }
-        }
-        // 毎フレーム（秒間60回）実行されるメイン処理ループ
-        function gameLoop() {
-            requestAnimationFrame(gameLoop);
-
-            // 1. 物理演算と移動の更新
-            applyPhysics();
-            updatePlayerMovement();
-
-            // 2. カメラの位置と回転を同期
-            camera.position.set(player.pos.x, player.pos.y + PLAYER_HEIGHT, player.pos.z);
-            updateCameraRotation();
-
-            // 3. プレイヤー位置に合わせた周辺チャンクの無限生成
-            updateInfiniteChunks();
-
-            // 4. 頭の位置のブロックに応じた水中・溶岩中フォグ効果の適用
-            const headBlock = getBlockAt(player.pos.x, player.pos.y + PLAYER_HEIGHT, player.pos.z);
-            if (headBlock === BLOCK_WATER) {
-                scene.background.setHex(0x103060);
-                scene.fog.color.setHex(0x103060);
-                scene.fog.density = 0.15;
-            } else if (headBlock === BLOCK_LAVA) {
-                scene.background.setHex(0x601000);
-                scene.fog.color.setHex(0x601000);
-                scene.fog.density = 0.4;
-            } else {
-                scene.background.setHex(0x84b0ff);
-                scene.fog.color.setHex(0x84b0ff);
-                scene.fog.density = 0.015;
-            }
-
-            // 5. 3Dシーンの描画
-            renderer.render(scene, camera);
-        }
-
-        // Three.jsロード完了後にシステム全体を一括起動するエントリーポイント
-        function initGame() {
-            // 1. 各種UI要素の組み立て（定義位置バグを防ぐため、関数の中身をここで直接実行します）
-            uiContainer = document.createElement('div');
-            uiContainer.style.position = 'absolute';
-            uiContainer.style.bottom = '20px';
-            uiContainer.style.width = '100%';
-            uiContainer.style.textAlign = 'center';
-            uiContainer.style.color = 'white';
-            uiContainer.style.fontFamily = 'monospace';
-            uiContainer.style.fontSize = '16px';
-            uiContainer.style.textShadow = '2px 2px #000';
-            uiContainer.style.pointerEvents = 'none';
-            uiContainer.style.zIndex = '10';
-            uiContainer.style.lineHeight = '1.8';
-            document.body.appendChild(uiContainer);
-            
-            // 外部のupdateUIを呼ばず、ここで安全に初期テキストを設定
-            let uiText = "【手持ちブロック】<br>";
-            const order = [BLOCK_DIRT, BLOCK_STONE, BLOCK_WOOD, BLOCK_LEAF, BLOCK_WATER, BLOCK_LAVA];
-            order.forEach((type, index) => {
-                const keyNum = index + 1;
-                if (type === currentSelectedBlockType) {
-                    uiText += ` <span style='color:#ffeb3b; font-weight:bold;'>▶ [${keyNum}: ${blockNames[type]}] ◀</span> `;
-                } else {
-                    uiText += ` [${keyNum}: ${blockNames[type].split(' ')}] `;
-                }
-            });
-            uiContainer.innerHTML = uiText + "<br><span style='font-size:12px; color:#ddd;'>【1～6キー】選択 / 【Jキー】破壊 / 【Kキー】設置</span>";
-
-            // 2. 基本シーン・カメラ・レンダラーのセットアップ
-            scene = new THREE.Scene();
-            scene.background = new THREE.Color(0x84b0ff);
-            scene.fog = new THREE.FogExp2(0x84b0ff, 0.015);
-
-            camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.1, 1000);
-            
-            renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" });
-            renderer.setSize(window.innerWidth, window.innerHeight);
-            document.body.appendChild(renderer.domElement);
-
-            // 3. ライティングの設定
-            const ambientLight = new THREE.AmbientLight(0xffffff, 0.55);
-            scene.add(ambientLight);
-            const sunLight = new THREE.DirectionalLight(0xffffff, 0.65);
-            sunLight.position.set(40, 100, 40);
-            scene.add(sunLight);
-
-            blockGeometry = new THREE.BoxGeometry(1, 1, 1);
-
-            // 4. 各種コントロール・マテリアルの初期化
-            window.addEventListener('keydown', e => { keys[e.code] = true; });
-            window.addEventListener('keyup', e => { keys[e.code] = false; });
-            
-            initMaterials();
-            initPointerLock();
-
-            // 5. 初回チャンク展開 ＆ 初期位置ホールド ➔ ゲーム起動
-            updateInfiniteChunks();
-            player.pos.x = 0; player.pos.z = 0; player.pos.y = 35;
-            
-            // 画面リサイズへの追従
-            window.addEventListener('resize', () => {
-                camera.aspect = window.innerWidth / window.innerHeight;
-                camera.updateProjectionMatrix();
-                renderer.setSize(window.innerWidth, window.innerHeight);
-            });
-
-            // メインループ作動
-            gameLoop();
-            console.log("【全8分割ビルド完了】すべてのエンジンコアがエラーなく連結されました。");
-        }
-    </script>
+</script>
 </body>
 </html>

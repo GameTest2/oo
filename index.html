@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>3Dやり投げゲーム (Javelin Throw 3D)</title>
+    <!-- 外部ライブラリの読み込み -->
+    <script src="https://cloudflare.com"></script>
+    <script src="https://cloudflare.com"></script>
+</head>
+<body>
+
+    <!-- UI表示エリア -->
+    <div id="ui">
+        <div id="score">記録: 0.00 m</div>
+        <div id="status">状態: 助走エリア</div>
+    </div>
+
+    <!-- スタート画面の説明ダイアログ -->
+    <div id="instructions">
+        <h2>3D ヤリ投げゲーム</h2>
+        <p>1. 【スペースキー】を連打して加速！</p>
+        <p>2. 白い線の手前で【Enterキー】を長押し！</p>
+        <p>3. 角度ゲージが良いところで【Enterキー】を離して投擲！</p>
+        <button onclick="startGame()" style="font-size:18px; padding:10px 20px; cursor:pointer;">ゲームスタート</button>
+    </div>
+
+    <!-- ゲーム中のパワー・角度メーター -->
+    <div id="angle-indicator" style="display:none;">角度: 0°</div>
+    <div id="gauge-container" style="display:none;"><div id="gauge-power"></div></div>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: sans-serif; background: #000; }
+        #ui { position: absolute; top: 10px; left: 10px; color: white; font-size: 18px; text-shadow: 2px 2px 2px black; pointer-events: none; }
+        #gauge-container { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); width: 300px; height: 25px; background: rgba(0,0,0,0.5); border: 2px solid white; border-radius: 5px; }
+        #gauge-power { width: 0%; height: 100%; background: linear-gradient(to right, lime, red); transition: width 0.1s; }
+        #angle-indicator { position: absolute; bottom: 50px; left: 50%; transform: translateX(-50%); color: yellow; font-size: 20px; font-weight: bold; }
+        #instructions { position: absolute; top: 40%; left: 50%; transform: translate(-50%, -50%); color: white; text-align: center; font-size: 24px; background: rgba(0,0,0,0.7); padding: 20px; border-radius: 10px; z-index: 10; }
+    </style>
+    <script>
+        let scene, camera, renderer, world;
+        let javelinMesh, javelinBody;
+        let gameState = 'init'; // init(初期), run(助走), angle(角度選定), fly(飛行), end(終了)
+        let power = 0;
+        let runDistance = 0;
+        let throwAngle = 0;
+        let maxRunDistance = 30; // ファウルラインまでの距離
+        let score = 0;
+
+        const uiScore = document.getElementById('score');
+        const uiStatus = document.getElementById('status');
+        const uiPower = document.getElementById('gauge-power');
+        const uiAngle = document.getElementById('angle-indicator');
+
+        // スタートボタンを押した時の処理
+        function startGame() {
+            document.getElementById('instructions').style.display = 'none';
+            document.getElementById('gauge-container').style.display = 'block';
+            document.getElementById('angle-indicator').style.display = 'block';
+            initThree();
+            initCannon();
+            createStage();
+            createJavelin();
+            gameState = 'run';
+            animate();
+        }
+
+        // キーボードを押した瞬間の判定
+        window.addEventListener('keydown', (e) => {
+            if (gameState === 'run') {
+                if (e.code === 'Space') {
+                    power = Math.min(power + 8, 100); // スペース連打でパワー上昇
+                }
+                if (e.code === 'Enter') {
+                    gameState = 'angle'; // エンター押しっぱなしで角度決定へ
+                }
+            }
+        });
+
+        // キーボードを離した瞬間の判定
+        window.addEventListener('keyup', (e) => {
+            if (gameState === 'angle' && e.code === 'Enter') {
+                throwJavelin(); // エンターを離して投げる！
+            }
+        });
+        // 3D空間の初期化
+        function initThree() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87CEEB);
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            document.body.appendChild(renderer.domElement);
+
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+            const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            dirLight.position.set(20, 40, 20);
+            dirLight.castShadow = true;
+            scene.add(dirLight);
+        }
+
+        // 物理エンジンの初期化
+        function initCannon() {
+            world = new CANNON.World();
+            world.gravity.set(0, -9.82, 0);
+        }
+
+        // 競技場の作成
+        function createStage() {
+            const groundGeo = new THREE.PlaneGeometry(50, 300);
+            const groundMat = new THREE.MeshStandardMaterial({ color: 0x228B22 });
+            const ground = new THREE.Mesh(groundGeo, groundMat);
+            ground.rotation.x = -Math.PI / 2;
+            ground.position.z = -120;
+            ground.receiveShadow = true;
+            scene.add(ground);
+
+            const groundBody = new CANNON.Body({ mass: 0, shape: new CANNON.Plane() });
+            groundBody.quaternion.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), -Math.PI / 2);
+            groundBody.position.set(0, 0, -120);
+            world.addBody(groundBody);
+
+            const trackGeo = new THREE.PlaneGeometry(4, maxRunDistance);
+            const trackMat = new THREE.MeshStandardMaterial({ color: 0xD2691E });
+            const track = new THREE.Mesh(trackGeo, trackMat);
+            track.rotation.x = -Math.PI / 2;
+            track.position.set(0, 0.01, -maxRunDistance/2);
+            scene.add(track);
+
+            const lineGeo = new THREE.PlaneGeometry(4, 0.3);
+            const lineMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+            const line = new THREE.Mesh(lineGeo, lineMat);
+            line.rotation.x = -Math.PI / 2;
+            line.position.set(0, 0.02, 0);
+            scene.add(line);
+
+            for(let i=10; i<=200; i+=10) {
+                const mLineGeo = new THREE.PlaneGeometry(10, 0.1);
+                const mLineMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+                const mLine = new THREE.Mesh(mLineGeo, mLineMat);
+                mLine.rotation.x = -Math.PI / 2;
+                mLine.position.set(0, 0.01, -i);
+                scene.add(mLine);
+            }
+        }
+
+        // 槍（ヤリ）の作成
+        function createJavelin() {
+            const javGeo = new THREE.CylinderGeometry(0.03, 0.03, 2.5, 8);
+            javGeo.rotateX(Math.PI / 2);
+            const javMat = new THREE.MeshStandardMaterial({ color: 0xffd700 });
+            javelinMesh = new THREE.Mesh(javGeo, javMat);
+            javelinMesh.castShadow = true;
+            scene.add(javelinMesh);
+
+            javelinBody = new CANNON.Body({ mass: 0, shape: new CANNON.Cylinder(0.03, 0.03, 2.5, 8) });
+            let q = new CANNON.Quaternion();
+            q.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), Math.PI / 2);
+            javelinBody.quaternion.copy(q);
+            world.addBody(javelinBody);
+            updateJavelinPosition();
+        }
+
+        function updateJavelinPosition() {
+            if (gameState === 'run' || gameState === 'angle') {
+                javelinMesh.position.set(0, 1.2, -runDistance);
+                javelinBody.position.copy(javelinMesh.position);
+            } else if (gameState === 'fly') {
+                javelinMesh.position.copy(javelinBody.position);
+                javelinMesh.quaternion.copy(javelinBody.quaternion);
+            }
+        }
+
+        // 槍を投げる物理処理
+        function throwJavelin() {
+            gameState = 'fly';
+            uiStatus.innerText = "状態: 飛行中！";
+            world.remove(javelinBody);
+            
+            javelinBody = new CANNON.Body({ mass: 0.8 });
+            javelinBody.addShape(new CANNON.Cylinder(0.03, 0.03, 2.5, 8));
+            javelinBody.position.set(0, 1.5, -runDistance);
+
+            const rad = throwAngle * Math.PI / 180;
+            const speed = (power / 100) * 30 + 5;
+            const vz = -speed * Math.cos(rad);
+            const vy = speed * Math.sin(rad);
+            javelinBody.velocity.set(0, vy, vz);
+
+            let q = new CANNON.Quaternion();
+            q.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), -rad);
+            javelinBody.quaternion.copy(q);
+            world.addBody(javelinBody);
+        }
+
+        // 毎フレームの更新ループ
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (gameState === 'fly') {
+                world.step(1 / 60);
+                const vel = javelinBody.velocity;
+                if (vel.length() > 1) {
+                    let angle = Math.atan2(vel.y, -vel.z);
+                    let q = new CANNON.Quaternion();
+                    q.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), -angle);
+                    javelinBody.quaternion.slerp(q, 0.05, javelinBody.quaternion);
+                }
+
+                if (javelinBody.position.y <= 0.1 && javelinBody.velocity.y < 0) {
+                    gameState = 'end';
+                    score = Math.abs(javelinBody.position.z);
+                    uiScore.innerText = `記録: ${score.toFixed(2)} m`;
+                    uiStatus.innerText = "状態: 競技終了！";
+                    alert(`競技終了！記録は ${score.toFixed(2)} メートルです！`);
+                }
+            }
+
+            if (gameState === 'run') {
+                power = Math.max(power - 0.5, 0);
+                uiPower.style.width = power + '%';
+                runDistance += (power / 100) * 0.15;
+                uiStatus.innerText = `状態: 助走中 (残り ${(maxRunDistance - runDistance).toFixed(1)}m)`;
+
+                if (runDistance >= maxRunDistance) {
+                    gameState = 'end';
+                    uiStatus.innerText = "状態: ファウル！";
+                    alert("ラインを越えました！ファウルです！");
+                }
+            } else if (gameState === 'angle') {
+                throwAngle = (throwAngle + 1.5) % 180;
+                let displayAngle = throwAngle > 90 ? 180 - throwAngle : throwAngle;
+                uiAngle.innerText = `角度: ${Math.floor(displayAngle)}°`;
+            }
+
+            updateJavelinPosition();
+
+            if (gameState === 'run' || gameState === 'angle') {
+                camera.position.set(3, 2.5, -runDistance + 4);
+                camera.lookAt(0, 1.5, -runDistance - 5);
+            } else if (gameState === 'fly') {
+                camera.position.set(javelinMesh.position.x + 4, javelinMesh.position.y + 2, javelinMesh.position.z + 5);
+                camera.lookAt(javelinMesh.position);
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            if(!camera) return;
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>

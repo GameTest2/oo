@@ -5,25 +5,26 @@
 <title>Voxel Demo (Creative) - J:Break K:Place</title>
 <style>
   body { margin:0; overflow:hidden; background:#000; color:#fff; font-family:monospace; }
-  #info { position: absolute; top:8px; left:8px; background:rgba(0,0,0,0.4); padding:8px; border-radius:4px; }
+  #info { position: absolute; top:8px; left:8px; background:rgba(0,0,0,0.4); padding:8px; border-radius:4px; z-index:10; }
   canvas { display:block; }
 </style>
 </head>
 <body>
 <div id="info">WASD move • Mouse look (click to lock) • J:Break • K:Place • R:regen</div>
-<script src="https://cdn.jsdelivr.net/npm/three@0.154.0/build/three.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.154.0/examples/js/controls/PointerLockControls.js"></script>
-<script>
+
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.154.0/build/three.module.js';
+import { PointerLockControls } from 'https://cdn.jsdelivr.net/npm/three@0.154.0/examples/jsm/controls/PointerLockControls.js';
+
 // CONFIG
 const CHUNK_SIZE = 16;
 const WORLD_HEIGHT = 64;
-const RENDER_DISTANCE = 3; // chunks radius
+const RENDER_DISTANCE = 3;
 const SEA_LEVEL = 18;
-const TILE_SIZE = 16; // pixels per tile in atlas
-const ATLAS_COLS = 4; // number of tiles horizontally in atlas
+const TILE_SIZE = 16;
+const ATLAS_COLS = 4;
 const ATLAS_ROWS = 2;
 
-// BLOCK IDS
 const AIR = 0, GRASS = 1, DIRT = 2, STONE = 3, SAND = 4, WATER = 5, LAVA = 6;
 const BLOCKS = {
   1: {name:'grass', tile:0},
@@ -49,14 +50,13 @@ scene.add(sun);
 scene.add(new THREE.AmbientLight(0xffffff, 0.4));
 
 // Controls
-const controls = new THREE.PointerLockControls(camera, document.body);
+const controls = new PointerLockControls(camera, renderer.domElement);
 document.addEventListener('click', ()=> controls.lock(), false);
 scene.add(controls.getObject());
 
-// Simple movement vars
+// Movement
 const move = {forward:false,back:false,left:false,right:false};
 let speed = 6;
-let yawMouse = 0;
 
 // Resize
 window.addEventListener('resize', ()=> {
@@ -64,7 +64,7 @@ window.addEventListener('resize', ()=> {
   renderer.setSize(innerWidth, innerHeight);
 });
 
-// Create texture atlas via canvas (pixel-art style)
+// Atlas canvas
 const atlasCanvas = document.createElement('canvas');
 atlasCanvas.width = TILE_SIZE * ATLAS_COLS;
 atlasCanvas.height = TILE_SIZE * ATLAS_ROWS;
@@ -73,7 +73,6 @@ const actx = atlasCanvas.getContext('2d');
 function drawPixelTile(x,y,color){
   actx.fillStyle=color;
   actx.fillRect(x,y, TILE_SIZE, TILE_SIZE);
-  // simple darker edge to give block look
   actx.fillStyle=shade(color, -0.12);
   actx.fillRect(x+TILE_SIZE-2,y+TILE_SIZE-2,2,2);
 }
@@ -82,26 +81,24 @@ function shade(hex, amt){
   let r = ((c>>16)&255), g=((c>>8)&255), b=(c&255);
   r = Math.max(0,Math.min(255, Math.floor(r*(1+amt))));
   g = Math.max(0,Math.min(255, Math.floor(g*(1+amt))));
-  b = Math.max(0,Math.min(255, Math.floor(b*(1+amt))));
+  b = Math.max(0,Math.min(255,Math.floor(b*(1+amt))));
   return '#'+((1<<24)+(r<<16)+(g<<8)+b).toString(16).slice(1);
 }
 
-// Tile colors
-drawPixelTile(0,0,'#6b8f3f'); // grass (tile 0)
-drawPixelTile(TILE_SIZE,0,'#7b4f2a'); // dirt (1)
-drawPixelTile(2*TILE_SIZE,0,'#8a8a8a'); // stone (2)
-drawPixelTile(3*TILE_SIZE,0,'#d9c98b'); // sand (3)
-drawPixelTile(0,TILE_SIZE,'#4ea7ff'); // water (4)
-drawPixelTile(TILE_SIZE,TILE_SIZE,'#ff6a00'); // lava (5)
+drawPixelTile(0,0,'#6b8f3f'); // grass
+drawPixelTile(TILE_SIZE,0,'#7b4f2a'); // dirt
+drawPixelTile(2*TILE_SIZE,0,'#8a8a8a'); // stone
+drawPixelTile(3*TILE_SIZE,0,'#d9c98b'); // sand
+drawPixelTile(0,TILE_SIZE,'#4ea7ff'); // water
+drawPixelTile(TILE_SIZE,TILE_SIZE,'#ff6a00'); // lava
 
 const atlasTexture = new THREE.CanvasTexture(atlasCanvas);
 atlasTexture.magFilter = THREE.NearestFilter;
 atlasTexture.minFilter = THREE.NearestMipMapNearestFilter;
 
-// Utility: 3D array key
+// Helpers
 function key(cx,cy,cz){ return `${cx},${cy},${cz}`; }
 
-// Simple Noise (Perlin-like) - use layered sine+random for lightweight
 function pseudoNoise(x,z){
   const nx = x*0.08, nz = z*0.08;
   let v = Math.sin(nx*1.5 + nz*0.3)*0.5 + Math.cos(nx*0.4 - nz*0.7)*0.25;
@@ -109,10 +106,8 @@ function pseudoNoise(x,z){
   return v;
 }
 
-// World data: chunk map from key-> {blocks: Uint8Array, mesh:Mesh}
 const chunks = new Map();
 
-// Generate chunk at chunk coords (cx,cz)
 function generateChunk(cx, cz){
   const blocks = new Uint8Array(CHUNK_SIZE * WORLD_HEIGHT * CHUNK_SIZE);
   for(let x=0;x<CHUNK_SIZE;x++){
@@ -130,9 +125,7 @@ function generateChunk(cx, cz){
         } else if(y <= SEA_LEVEL && y<=height+1){
           id = WATER;
         }
-        // beaches: if near sea level and top is sand
         if(id === GRASS && height <= SEA_LEVEL+1) id = SAND;
-        // small lava pools below certain depth
         if(y<5 && Math.random()<0.002) id = LAVA;
         blocks[index(x,y,z)] = id;
       }
@@ -143,10 +136,8 @@ function generateChunk(cx, cz){
   buildChunkMesh(cx,cz);
 }
 
-// index helper
 function index(x,y,z){ return (y*CHUNK_SIZE + z)*CHUNK_SIZE + x; }
 
-// Return block id or AIR if out of bounds/chunk missing
 function getBlock(wx,wy,wz){
   const cx = Math.floor(wx/CHUNK_SIZE);
   const cz = Math.floor(wz/CHUNK_SIZE);
@@ -170,7 +161,6 @@ function setBlock(wx,wy,wz,id){
   buildChunkMesh(cx,cz);
 }
 
-// Build mesh for chunk (simple face culling)
 function buildChunkMesh(cx, cz){
   const chunk = chunks.get(key(cx,0,cz));
   if(!chunk) return;
@@ -187,35 +177,7 @@ function buildChunkMesh(cx, cz){
   const indices = [];
   let vertIndex = 0;
 
-  function pushFace(px,py,pz, nx,ny,nz, w,h, tileIndex){
-    // w,h in blocks (w and h always 1 here)
-    // face quad vertices
-    const du = (tileIndex % ATLAS_COLS) * TILE_SIZE / (TILE_SIZE*ATLAS_COLS);
-    const dv = Math.floor(tileIndex / ATLAS_COLS) * TILE_SIZE / (TILE_SIZE*ATLAS_ROWS);
-    const su = 1/ATLAS_COLS, sv = 1/ATLAS_ROWS;
-    // quad
-    const vx = [
-      [px,py,pz],
-      [px+ (nx===0? (ny===0?1:0) :0), py + (ny===0? (nz===0?1:0):0), pz + (nz===0? (nx===0?1:0):0)], // filler: we construct faces per known axis below
-    ];
-    // We'll add vertices per-face by direction explicit
-    const v = faceCorners(px,py,pz,nx,ny,nz);
-    for(let i=0;i<4;i++){
-      positions.push(...v[i]);
-      normals.push(nx,ny,nz);
-    }
-    // UVs (simple)
-    uvs.push(du, dv+sv);
-    uvs.push(du+su, dv+sv);
-    uvs.push(du+su, dv);
-    uvs.push(du, dv);
-    indices.push(vertIndex, vertIndex+1, vertIndex+2, vertIndex, vertIndex+2, vertIndex+3);
-    vertIndex +=4;
-  }
-
-  // returns 4 corners for face depending on normal
   function faceCorners(x,y,z,nx,ny,nz){
-    const s = 1;
     if(nx===1) return [[x+1,y,z],[x+1,y,z+1],[x+1,y+1,z+1],[x+1,y+1,z]];
     if(nx===-1) return [[x,y,z+1],[x,y,z],[x,y+1,z],[x,y+1,z+1]];
     if(nz===1) return [[x+1,y,z+1],[x,y,z+1],[x,y+1,z+1],[x+1,y+1,z+1]];
@@ -223,6 +185,23 @@ function buildChunkMesh(cx, cz){
     if(ny===1) return [[x,y+1,z],[x+1,y+1,z],[x+1,y+1,z+1],[x,y+1,z+1]];
     if(ny===-1) return [[x,y,z+1],[x+1,y,z+1],[x+1,y,z],[x,y,z]];
     return [[x,y,z],[x+1,y,z],[x+1,y+1,z+1],[x,y+1,z+1]];
+  }
+
+  function pushFace(px,py,pz, nx,ny,nz, tileIndex){
+    const du = (tileIndex % ATLAS_COLS) / ATLAS_COLS;
+    const dv = Math.floor(tileIndex / ATLAS_COLS) / ATLAS_ROWS;
+    const su = 1/ATLAS_COLS, sv = 1/ATLAS_ROWS;
+    const v = faceCorners(px,py,pz,nx,ny,nz);
+    for(let i=0;i<4;i++){
+      positions.push(...v[i]);
+      normals.push(nx,ny,nz);
+    }
+    uvs.push(du, dv+sv);
+    uvs.push(du+su, dv+sv);
+    uvs.push(du+su, dv);
+    uvs.push(du, dv);
+    indices.push(vertIndex, vertIndex+1, vertIndex+2, vertIndex, vertIndex+2, vertIndex+3);
+    vertIndex +=4;
   }
 
   for(let x=0;x<CHUNK_SIZE;x++){
@@ -233,7 +212,6 @@ function buildChunkMesh(cx, cz){
         const wx = cx*CHUNK_SIZE + x;
         const wy = y;
         const wz = cz*CHUNK_SIZE + z;
-        // six neighbors
         const npos = [
           [wx+1,wy,wz,1,0,0],
           [wx-1,wy,wz,-1,0,0],
@@ -244,12 +222,10 @@ function buildChunkMesh(cx, cz){
         ];
         for(const nb of npos){
           const nbid = getBlock(nb[0],nb[1],nb[2]);
-          // water & lava should show faces against air and against different fluids (simple)
           const show = (nbid===AIR) || (isFluid(id) && nbid!==id && nbid!==AIR);
           if(show){
-            // choose tile index per block
             const tile = (BLOCKS[id] && BLOCKS[id].tile != null) ? BLOCKS[id].tile : 0;
-            pushFace(wx,wy,wz, nb[3],nb[4],nb[5],1,1,tile);
+            pushFace(wx,wy,wz, nb[3],nb[4],nb[5], tile);
           }
         }
       }
@@ -269,10 +245,8 @@ function buildChunkMesh(cx, cz){
   chunk.mesh = mesh;
 }
 
-// fluid helper
 function isFluid(id){ return id===WATER || id===LAVA; }
 
-// Generate initial world around (0,0)
 function genAround(px,pz){
   const pcx = Math.floor(px/CHUNK_SIZE);
   const pcz = Math.floor(pz/CHUNK_SIZE);
@@ -284,7 +258,6 @@ function genAround(px,pz){
   }
 }
 
-// Player start
 controls.getObject().position.set(0, SEA_LEVEL+10, 0);
 camera.position.copy(controls.getObject().position);
 genAround(0,0);
@@ -295,7 +268,7 @@ document.addEventListener('keydown', (e)=>{
   if(e.code==='KeyS') move.back=true;
   if(e.code==='KeyA') move.left=true;
   if(e.code==='KeyD') move.right=true;
-  if(e.code==='KeyR'){ // regen
+  if(e.code==='KeyR'){
     for(const k of chunks.keys()) {
       const c = chunks.get(k);
       if(c.mesh){ scene.remove(c.mesh); c.mesh.geometry.dispose(); c.mesh.material.dispose(); }
@@ -313,8 +286,7 @@ document.addEventListener('keyup', (e)=>{
   if(e.code==='KeyD') move.right=false;
 });
 
-// Raycast helper to find target block in front (maxDist)
-const raycaster = new THREE.Raycaster();
+// Ray-based pick
 function pickBlock(maxDist=6){
   const origin = controls.getObject().position.clone();
   const dir = new THREE.Vector3(0,0,-1).applyQuaternion(controls.getObject().quaternion).normalize();
@@ -328,20 +300,17 @@ function pickBlock(maxDist=6){
   return null;
 }
 
-// Break block (J)
 function actionBreak(){
   const hit = pickBlock(6);
   if(!hit) return;
   setBlock(hit.x,hit.y,hit.z, AIR);
 }
 
-// Place block (K) -> place grass block adjacent to face we looked at (place in front of hit)
 function actionPlace(){
   const hit = pickBlock(6);
   const origin = controls.getObject().position.clone();
   const dir = new THREE.Vector3(0,0,-1).applyQuaternion(controls.getObject().quaternion).normalize();
   if(hit){
-    // find empty adjacent cell along ray slightly past the hit point
     for(let d=0.2; d<=6; d+=0.2){
       const px = Math.floor(origin.x + dir.x * d);
       const py = Math.floor(origin.y + dir.y * d);
@@ -353,7 +322,6 @@ function actionPlace(){
       }
     }
   } else {
-    // place in front if no hit
     const px = Math.floor(origin.x + dir.x * 3);
     const py = Math.floor(origin.y + dir.y * 3);
     const pz = Math.floor(origin.z + dir.z * 3);
@@ -361,11 +329,10 @@ function actionPlace(){
   }
 }
 
-// simple animation: water/lava "flow" (very naive) - spread down then out
+// Simple fluid tick
 function fluidTick(){
   const toSet = [];
   for(const [k,chunk] of chunks){
-    // iterate blocks
     for(let x=0;x<CHUNK_SIZE;x++) for(let z=0;z<CHUNK_SIZE;z++) for(let y=0;y<WORLD_HEIGHT;y++){
       const id = chunk.blocks[index(x,y,z)];
       if(id===WATER || id===LAVA){
@@ -379,7 +346,6 @@ function fluidTick(){
           for(const d of dirs){
             const nx = wx+d[0], nz = wz+d[1];
             if(getBlock(nx,y,nz)===AIR){
-              // occasional spread
               if(Math.random()<0.02) toSet.push({x:nx,y:y,z:nz,id:id});
             }
           }
@@ -390,13 +356,12 @@ function fluidTick(){
   for(const s of toSet) setBlock(s.x,s.y,s.z,s.id);
 }
 
-// Player movement update
+// Animation
 const clock = new THREE.Clock();
 let fluidTimer = 0;
 function animate(){
   requestAnimationFrame(animate);
   const dt = clock.getDelta();
-  // movement
   const dir = new THREE.Vector3();
   if(move.forward) dir.z -= 1;
   if(move.back) dir.z += 1;
@@ -405,14 +370,9 @@ function animate(){
   dir.normalize().applyQuaternion(controls.getObject().quaternion);
   controls.getObject().position.addScaledVector(dir, speed * dt);
   camera.position.copy(controls.getObject().position);
-
-  // regen nearby chunks if needed
   genAround(controls.getObject().position.x, controls.getObject().position.z);
-
-  // fluid tick
   fluidTimer += dt;
   if(fluidTimer > 0.5){ fluidTick(); fluidTimer = 0; }
-
   renderer.render(scene, camera);
 }
 animate();

@@ -1,4 +1,4 @@
-<<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
@@ -32,26 +32,24 @@
             const encodedUrl = "aHR0cHM6Ly9jZG5qcy5jbG91ZGZsYXJlLmNvbS9hamF4L2xpYnMvdGhyZWUuanMvcjEyOC90aHJlZS5taW4uanM=";
             const script = document.createElement('script');
             script.src = atob(encodedUrl);
-            script.onload = initGame;
+            script.onload = () => { initGame(); }; // 初期化関数を実行
             document.head.appendChild(script);
         })();
 
-        // グローバル管理変数
-        let scene, camera, renderer;
-        let keys = {};
-        let player = { pos: { x: 0, y: 25, z: 0 }, rot: { x: 0, y: 0 }, speed: 0.15, velocity: { y: 0 }, isGrounded: false };
-        
-        // チャンク構造（極限軽量化：16×16×64のボリュームデータとして管理）
+        // 全パート共通のグローバル変数の宣言
+        let scene, camera, renderer, blockGeometry;
+        const keys = {};
+        const player = { pos: { x: 0, y: 25, z: 0 }, rot: { x: 0, y: 0 }, speed: 0.15, velocity: { y: 0 }, isGrounded: false };
         const chunks = {};
-        const CHUNK_SIZE = 16;
-        const CHUNK_HEIGHT = 64;     // 高さを深くして地下空間を確保
-        const RENDER_DISTANCE = 3;   // 描画距離（チャンク半径）
+        const instancedMeshes = {};
+        const materialsMap = {};
         
-        // 生成ルールの環境定数
-        const WATER_LEVEL = 12;      // 水面の高さ（これより低い凹地は水になる）
-        const LAVA_LEVEL = 4;        // 溶岩湖の高さ（地下深くの空洞の底に溜まる）
+        const CHUNK_SIZE = 16;
+        const CHUNK_HEIGHT = 64;
+        const RENDER_DISTANCE = 3;
+        const WATER_LEVEL = 12;
+        const LAVA_LEVEL = 4;
 
-        // ブロックID定義
         const BLOCK_AIR = 0;
         const BLOCK_GRASS = 1;
         const BLOCK_DIRT = 2;
@@ -59,10 +57,7 @@
         const BLOCK_WOOD = 4;
         const BLOCK_LEAF = 5;
         const BLOCK_WATER = 6;
-        const BLOCK_LAVA = 7;        // 新要素：溶岩
-
-        let blockGeometry;
-        const instancedMeshes = {};  // ブロックタイプごとの描画統合コンテナ
+        const BLOCK_LAVA = 7;
 
         // 地形＆洞窟＆溶岩湖用の高品質3Dパーリンノイズ
         const Perlin = {
@@ -96,6 +91,7 @@
         };
         Perlin.init();
 
+        // メインのゲームセットアップ処理
         function initGame() {
             scene = new THREE.Scene();
             scene.background = new THREE.Color(0x84b0ff);
@@ -103,12 +99,10 @@
 
             camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.1, 1000);
             
-            // WebGLの軽量化オプションをフル適用
             renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" });
             renderer.setSize(window.innerWidth, window.innerHeight);
             document.body.appendChild(renderer.domElement);
 
-            // 太陽光と環境光
             const ambientLight = new THREE.AmbientLight(0xffffff, 0.55);
             scene.add(ambientLight);
             const sunLight = new THREE.DirectionalLight(0xffffff, 0.65);
@@ -117,20 +111,17 @@
 
             blockGeometry = new THREE.BoxGeometry(1, 1, 1);
 
-            // 操作方法の変更（視点移動以外はすべてキーボード入力で制御）
             window.addEventListener('keydown', e => { keys[e.code] = true; });
             window.addEventListener('keyup', e => { keys[e.code] = false; });
-            // プロシージャル（計算によって自動生成される）なドット絵テクスチャを作る関数
+            // プロシージャルなドット絵テクスチャを作る関数
             function createProceduralTexture(type) {
                 const canvas = document.createElement('canvas');
                 canvas.width = 16;
                 canvas.height = 16;
                 const ctx = canvas.getContext('2d');
 
-                // 16x16ピクセルのドット絵をループで描き込む
                 for (let x = 0; x < 16; x++) {
                     for (let y = 0; y < 16; y++) {
-                        // ノイズを混ぜてマイクラ特有のザラザラしたドット感を表現
                         const rand = Math.random() * 0.15;
                         let r, g, b;
 
@@ -145,9 +136,9 @@
                         } else if (type === 'leaf') {
                             r = 53 / 255 - rand; g = 96 / 255 - rand; b = 36 / 255 - rand;
                         } else if (type === 'water') {
-                            r = 40 / 255; g = 100 / 255; b = 200 / 255 + rand; // 青みが変化
+                            r = 40 / 255; g = 100 / 255; b = 200 / 255 + rand;
                         } else if (type === 'lava') {
-                            r = 230 / 255; g = 90 / 255 + rand; b = 20 / 255;   // 赤黄が変化
+                            r = 230 / 255; g = 90 / 255 + rand; b = 20 / 255;
                         }
 
                         ctx.fillStyle = `rgb(${Math.floor(r * 255)}, ${Math.floor(g * 255)}, ${Math.floor(b * 255)})`;
@@ -155,7 +146,6 @@
                     }
                 }
 
-                // 草ブロックの側面だけは、上部30%を緑、下部を茶色にする
                 if (type === 'grass_side') {
                     ctx.fillStyle = 'rgb(134, 96, 67)';
                     ctx.fillRect(0, 0, 16, 16);
@@ -167,13 +157,11 @@
                 }
 
                 const texture = new THREE.CanvasTexture(canvas);
-                // マイクラのパキッとしたドット絵を保つための必須設定（ぼかしを無効化）
                 texture.magFilter = THREE.NearestFilter;
                 texture.minFilter = THREE.NearestFilter;
                 return texture;
             }
 
-            // 各種テクスチャマップの作成
             const texGrassTop = createProceduralTexture('grass_top');
             const texGrassSide = createProceduralTexture('grass_side');
             const texDirt = createProceduralTexture('dirt');
@@ -183,18 +171,16 @@
             const texWater = createProceduralTexture('water');
             const texLava = createProceduralTexture('lava');
 
-            // マテリアル化ヘルパー
             function makeMat(tex) { return new THREE.MeshLambertMaterial({ map: tex }); }
             function makeFluidMat(tex) { return new THREE.MeshLambertMaterial({ map: tex, transparent: true, opacity: 0.8 }); }
 
-            // 各ブロックの6面マテリアルをマッピング [右, 左, 上, 下, 前, 後]
+            // 各ブロックの6面マテリアルをマッピング
             materialsMap[BLOCK_GRASS] = [makeMat(texGrassSide), makeMat(texGrassSide), makeMat(texGrassTop), makeMat(texDirt), makeMat(texGrassSide), makeMat(texGrassSide)];
             materialsMap[BLOCK_DIRT] = Array(6).fill(makeMat(texDirt));
             materialsMap[BLOCK_STONE] = Array(6).fill(makeMat(texStone));
             materialsMap[BLOCK_WOOD] = Array(6).fill(makeMat(texWood));
             materialsMap[BLOCK_LEAF] = Array(6).fill(makeMat(texLeaf));
             materialsMap[BLOCK_WATER] = Array(6).fill(makeFluidMat(texWater));
-            // 溶岩は光るためMeshBasicMaterialにして陰影計算をカット（さらなる軽量化）
             materialsMap[BLOCK_LAVA] = Array(6).fill(new THREE.MeshBasicMaterial({ map: texLava }));
             // 指定されたチャンク座標（cx, cz）のボクセル（ブロック配列）データを生成する関数
             function generateChunkData(cx, cz) {

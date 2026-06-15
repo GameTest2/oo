@@ -597,7 +597,7 @@
 
         // Three.jsロード完了後にシステム全体を一括起動するエントリーポイント
         function initGame() {
-            // 1. 各種UI要素の組み立て
+            // 1. 各種UI要素の組み立て（定義位置バグを防ぐため、関数の中身をここで直接実行します）
             uiContainer = document.createElement('div');
             uiContainer.style.position = 'absolute';
             uiContainer.style.bottom = '20px';
@@ -611,7 +611,19 @@
             uiContainer.style.zIndex = '10';
             uiContainer.style.lineHeight = '1.8';
             document.body.appendChild(uiContainer);
-            updateUI();
+            
+            // 外部のupdateUIを呼ばず、ここで安全に初期テキストを設定
+            let uiText = "【手持ちブロック】<br>";
+            const order = [BLOCK_DIRT, BLOCK_STONE, BLOCK_WOOD, BLOCK_LEAF, BLOCK_WATER, BLOCK_LAVA];
+            order.forEach((type, index) => {
+                const keyNum = index + 1;
+                if (type === currentSelectedBlockType) {
+                    uiText += ` <span style='color:#ffeb3b; font-weight:bold;'>▶ [${keyNum}: ${blockNames[type]}] ◀</span> `;
+                } else {
+                    uiText += ` [${keyNum}: ${blockNames[type].split(' ')}] `;
+                }
+            });
+            uiContainer.innerHTML = uiText + "<br><span style='font-size:12px; color:#ddd;'>【1～6キー】選択 / 【Jキー】破壊 / 【Kキー】設置</span>";
 
             // 2. 基本シーン・カメラ・レンダラーのセットアップ
             scene = new THREE.Scene();

@@ -21,7 +21,7 @@
 <body>
 
     <div id="info">
-        極限軽量マイクラ3D (1 / 3分割統合ビルド)<br>
+        極限軽量マイクラ3D (1 / 8分割統合ビルド)<br>
         【操作】W,A,S,D: 移動 / スペース: ジャンプ / 1～6: ブロック選択 / J: 破壊 / K: 設置
     </div>
     <div id="crosshair">+</div>
@@ -60,6 +60,17 @@
         const BLOCK_LAVA = 7;
 
         let currentSelectedBlockType = BLOCK_DIRT;
+        let isLocked = false; // マウスロック状態フラグを最上部で共有
+
+        // どこから呼び出されてもバグらないように、名前データを最上部に定義
+        const blockNames = {
+            [BLOCK_DIRT]: "土 (DIRT)",
+            [BLOCK_STONE]: "石 (STONE)",
+            [BLOCK_WOOD]: "原木 (WOOD)",
+            [BLOCK_LEAF]: "葉 (LEAF)",
+            [BLOCK_WATER]: "水 (WATER)",
+            [BLOCK_LAVA]: "溶岩 (LAVA)"
+        };
 
         // 地形＆洞窟＆溶岩湖用の高品質3Dパーリンノイズ
         const Perlin = {
@@ -138,6 +149,7 @@
             texture.minFilter = THREE.NearestFilter;
             return texture;
         }
+
         // 各ブロックのテクスチャを生成してマテリアルをマッピングする関数
         function initMaterials() {
             const texGrassTop = createProceduralTexture('grass_top');
